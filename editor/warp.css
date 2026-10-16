@@ -1,0 +1,120 @@
+/* Motion tab: the stack fills the settings window; the live deformation preview takes the monitor's place
+   on the right (under the same save bar) and is built from the monitor's own classes (.tabs, .viewer, .readout,
+   details.log), so it looks like the other tabs. Uses the editor's tokens and its .btn / .chip / .facts / .w. */
+.controls { container-type: inline-size }
+#warp { margin-top: 8px }
+.wl { display: flex; flex-direction: column; gap: 8px; min-width: 0 }
+.mon-warp .wl-mon { display: flex; flex-direction: column; gap: 6px; min-width: 0;
+  position: sticky; top: -10px; z-index: 3; background: var(--panel); margin-top: -10px; padding: 10px 0 6px }
+.wl h3 { font: 700 14px/1 var(--display); margin: 0 }
+.wl-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap }
+.wl-head .sub { font-size: 12px; color: var(--muted) }
+.wl-head .sp { flex: 1 }
+.wl .chip[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent) }
+.wl .chips { grid-column: auto }
+.wl-note { border-radius: 6px; padding: 5px 8px; font-size: 12px; background: var(--info-soft); color: var(--muted); display: flex; gap: 8px; align-items: center; flex-wrap: wrap }
+.wl-note b { color: var(--fg); font-weight: 600 }
+
+/* stack */
+.wl-stack { display: flex; flex-direction: column; gap: 4px }
+.wl-empty { padding: 10px; border: 1px dashed var(--line); border-radius: 6px; color: var(--muted); font-size: 12.5px }
+.wl-mod { background: var(--panel); border: 1px solid var(--line); border-radius: 6px }
+.wl-mod.sel { border-color: var(--accent) }
+.wl-mod.off { opacity: .55 }
+.wl-mh { display: flex; align-items: center; gap: 6px; padding: 3px 6px 3px 4px; cursor: pointer }
+.wl-mh .order { display: flex; flex-direction: column }
+.wl-mh .order button { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0 3px; font-size: 9px; line-height: 1.15 }
+.wl-mh .order button:hover:not(:disabled) { color: var(--fg) }
+.wl-mh .order button:disabled { opacity: .3; cursor: default }
+.wl-mh canvas { width: 44px; height: 25px; border-radius: 4px; background: var(--panel-2); flex: none }
+.wl-mh .mname { display: flex; gap: 6px; align-items: baseline; min-width: 0 }
+.wl-mh .mname b { font: 700 13.5px var(--display) }
+.wl-mh .mname code { color: var(--muted); font-size: 11px }
+.wl-mh .sp { flex: 1 }
+.wl-tog { border: 1px solid var(--line); background: none; border-radius: 5px; padding: 0 6px; font-size: 11.5px; font-weight: 600; cursor: pointer; color: var(--muted); line-height: 18px }
+.wl-tog[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft) }
+.wl-tog.solo[aria-pressed="true"] { color: var(--changed); border-color: var(--changed); background: var(--warn-soft) }
+.wl-tog.x:hover { color: var(--bad); border-color: var(--bad) }
+.wl-mb { padding: 0 8px 6px; display: flex; flex-direction: column; gap: 1px }
+.wl-p { display: grid; grid-template-columns: 118px minmax(0, 1fr) 64px 24px; gap: 6px; align-items: center }
+.wl-p label { display: flex; gap: 5px; align-items: baseline; font-size: 12.5px; min-width: 0; white-space: nowrap; overflow: hidden }
+.wl-p label code { color: var(--muted); font-size: 10.5px }
+.wl-p input[type=range] { accent-color: var(--accent); height: 16px; margin: 0; min-width: 0 }
+.wl-p input[type=number] { width: 64px }
+.wl-wv { width: 24px; height: 20px; border: 1px solid var(--line); background: none; border-radius: 5px; cursor: pointer; color: var(--muted); font-size: 13px; line-height: 1; padding: 0 }
+.wl-wv:hover { color: var(--fg) }
+.wl-wv.on { color: var(--accent-ink); background: var(--accent); border-color: var(--accent) }
+.wl-wv[aria-expanded="true"]:not(.on) { color: var(--accent); border-color: var(--accent) }
+.wl-curve { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 1px 0 4px 124px; padding: 4px 8px; border-radius: 5px; background: var(--panel-2); font-size: 12px; color: var(--muted) }
+.wl-curve label { display: flex; align-items: center; gap: 4px }
+.wl-curve input[type=range] { width: 70px; accent-color: var(--accent) }
+.wl-curve input[type=number] { width: 52px }
+.wl-curve canvas { width: 130px; height: 22px; flex: none }
+.wl-where { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 3px; padding-top: 4px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted) }
+.wl-where label { display: flex; align-items: center; gap: 4px }
+.wl-where input[type=range] { width: 70px; accent-color: var(--accent) }
+.wl-where .pv { font-family: var(--mono); font-size: 11px }
+
+/* catalog */
+details.wl-add > summary { cursor: pointer; font: 700 14px var(--display); padding: 2px 0; list-style: none; display: flex; flex-wrap: wrap; gap: 0 6px; align-items: baseline; white-space: nowrap }
+details.wl-add > summary span { white-space: normal }
+details.wl-add > summary::-webkit-details-marker { display: none }
+details.wl-add > summary::before { content: "▾"; font-size: 11px; color: var(--muted); display: inline-block; width: 10px; transition: transform .15s }
+details.wl-add:not([open]) > summary::before { transform: rotate(-90deg) }
+details.wl-add > summary span { font: 400 12px var(--body); color: var(--muted) }
+.wl-fam { font-size: 10.5px; color: var(--muted); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; margin: 6px 0 3px }
+.wl-cat { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 190px), 1fr)); gap: 4px }
+.wl-c { text-align: left; display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 1px 8px; padding: 5px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; color: var(--fg); font: inherit }
+.wl-c:hover:not(:disabled) { border-color: var(--accent) }
+.wl-c:disabled { cursor: not-allowed; opacity: .55 }
+.wl-c canvas { width: 56px; height: 32px; border-radius: 4px; background: var(--panel-2); grid-row: span 2 }
+.wl-c b { font: 700 13px var(--display); display: flex; justify-content: space-between; gap: 4px; align-items: baseline }
+.wl-c p { margin: 0; font-size: 11.5px; color: var(--muted); line-height: 1.3 }
+.wl-box { background: var(--panel); border-radius: 6px; padding: 6px 8px; display: flex; flex-direction: column; gap: 4px }
+.wl-box .wl-p { grid-template-columns: 118px minmax(0, 1fr) 64px }
+.wl-box .hint { margin: 0; font-size: 12px; color: var(--muted) }
+.wl fieldset.group { margin-top: 0 }
+
+/* preview */
+.wl-views { flex-wrap: wrap }
+.wl-vo { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--muted); min-height: 22px }
+.wl-vo label { display: flex; gap: 4px; align-items: center }
+.wl-vo input[type=range] { width: 90px; accent-color: var(--accent) }
+.wl-legend { display: inline-flex; gap: 4px; align-items: center }
+.wl-legend i { width: 60px; height: 7px; border-radius: 4px; display: inline-block }
+.wl-screen { position: relative; aspect-ratio: 16 / 9; max-width: 100%; background: #000; border-radius: 6px; overflow: hidden; touch-action: none }
+.wl-screen canvas, .wl-screen svg { position: absolute; inset: 0; width: 100%; height: 100% }
+.wl-screen .badge { position: absolute; top: 6px; left: 6px; background: rgba(13,15,19,.78); color: var(--muted); font: 600 10px/1 var(--body); letter-spacing: .07em; padding: 3px 6px; border-radius: 4px; text-transform: uppercase; pointer-events: none }
+.wl-screen .busy { position: absolute; bottom: 6px; left: 6px; background: rgba(13,15,19,.85); font-size: 11.5px; padding: 3px 7px; border-radius: 4px; pointer-events: none }
+.wl-screen .nogl { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; text-align: center; color: var(--muted) }
+.wl-tr { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--muted) }
+.wl-tr input[type=range] { flex: 1; min-width: 90px; accent-color: var(--accent) }
+.wl-tr .btn { flex: none }
+.wl-tr .clock { font-family: var(--mono); font-size: 11.5px; color: var(--fg); min-width: 78px; text-align: right; font-variant-numeric: tabular-nums }
+.wl-tr label { display: flex; gap: 4px; align-items: center }
+.wl-lanes { background: var(--panel-2); border-radius: 6px; padding: 4px 6px }
+.wl-lanes canvas { width: 100%; display: block }
+.wl-lanes p { margin: 1px 0; font-size: 12px; color: var(--muted) }
+.wl-src { display: flex; gap: 4px 6px; align-items: center; flex-wrap: wrap; font-size: 12px; color: var(--muted) }
+.mon-warp .facts dd { display: flex; gap: 8px; align-items: center }
+.mon-warp .facts dd b { min-width: 7.5ch }
+.mon-warp .wl-box { background: var(--panel-2) }
+.mon-warp .wl-jl label { display: flex; gap: 5px; align-items: center }
+.wl-bar { flex: 1; height: 4px; border-radius: 999px; background: var(--panel-2); overflow: hidden; min-width: 30px }
+.wl-bar > div { height: 100%; background: var(--accent); width: 0 }
+.wl-bar.warn > div { background: var(--warn) }
+.wl-bar.bad > div { background: var(--bad) }
+
+/* Narrow settings window: parameter labels go above their sliders */
+@container (max-width: 560px) {
+  .wl-p { grid-template-columns: minmax(0, 1fr) 60px 24px }
+  .wl-p label { grid-column: 1 / -1 }
+  .wl-curve { margin-left: 0 }
+}
+/* Narrow browser window: the editor stacks the monitor above the settings. On the Motion tab the monitor sticks
+   under the header, with a smaller preview, so it stays in view while the stack scrolls. */
+@media (max-width: 1000px) {
+  body[data-tab="motion"] .monitor { position: sticky; top: 0; z-index: 4; max-height: 62vh; border-bottom: 1px solid var(--line) }
+  .mon-warp .wl-screen { width: min(100%, calc(32vh * var(--wl-aspect, 1.7778))); margin: 0 auto }
+}
+@media (prefers-reduced-motion: reduce) { details.wl-add > summary::before { transition: none } }

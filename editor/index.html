@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="/warp.css">
 <style>
 /* Layout: a mixing desk. Controls scroll on the left in labelled channel groups (two columns on wide screens);
    the monitor (video, readout, transport buttons) stays fixed on the right. Dense on purpose: everything should
@@ -64,6 +65,7 @@ body[data-mode="t2i"] .dream-only { display: none }
 main.editor { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 0; flex: 1; min-height: 0 }
 .controls { overflow: auto; padding: 8px 12px 40px }
 .monitor { border-left: 1px solid var(--line); background: var(--panel); overflow: auto; padding: 10px 12px 30px; display: flex; flex-direction: column; gap: 10px }
+.mon-out, .mon-warp { display: flex; flex-direction: column; gap: 10px }
 
 .recipes-bar { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center }
 .recipes-bar label { font-weight: 600 }
@@ -206,6 +208,7 @@ details.log pre { font: 11px/1.4 var(--mono); background: #090b0e; border-radius
       <span class="status">Only the recipe's settings change; everything else stays as it is.</span>
     </div>
     <div id="groups"></div>
+    <div id="warp" hidden></div>
     <p class="status" style="margin-top:14px">Measured guidance from the <a href="https://claude.ai/artifact/4hQLch6YL9zqVKKWzGNRvt" target="_blank" rel="noopener">DeepDreamer Settings Atlas</a>. Single renders vary a lot with the seed; treat the numbers as typical values.</p>
   </section>
 
@@ -215,6 +218,8 @@ details.log pre { font: 11px/1.4 var(--mono); background: #090b0e; border-radius
       <button class="btn" id="btn-revert" disabled>Revert</button>
       <button class="btn primary" id="btn-save" disabled>Save settings.ini</button>
     </div>
+    <div class="mon-warp" id="warp-side" hidden></div>
+    <div class="mon-out" id="mon-out">
     <div class="viewer">
       <div class="screen"><video id="player" controls loop muted playsinline></video>
         <img id="live" alt="The frame being dreamed right now" hidden><span class="live-badge" id="live-badge" hidden>LIVE</span>
@@ -239,6 +244,7 @@ details.log pre { font: 11px/1.4 var(--mono); background: #090b0e; border-radius
       <h2>What to expect</h2>
       <dl class="facts" id="facts"></dl>
       <div class="warnings" id="warnings"></div>
+    </div>
     </div>
   </aside>
 </main>
@@ -279,9 +285,10 @@ details.log pre { font: 11px/1.4 var(--mono); background: #090b0e; border-radius
 
 <div class="toast" id="toast" hidden></div>
 
+<script src="/warp.js"></script>
 <script>
 const TOKEN = "__TOKEN__";
-const EDITOR_VERSION = 4;   // must match VERSION in server.py
+const EDITOR_VERSION = 5;   // must match VERSION in server.py
 const api = async (path, body) => {
   const r = await fetch(path, body === undefined ? { headers: { "X-Token": TOKEN } }
     : { method: "POST", headers: { "X-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -310,12 +317,7 @@ const GROUPS = [
   { k: "prompt_cuts", name: "Crops per frame", min: 1, max: 16, step: 1, int: true, tags: ["feedback"],
     help: "How many random views of the frame the prompt network checks each frame. More = steadier but slower." },
  ]},
- { tab: "motion", title: "Motion", sub: "how the camera falls into the picture", items: [
-  { k: "zoom_rate", name: "Zoom speed", min: 0, max: 2, step: 0.01, tags: ["feedback"],
-    help: "Main dial for how long a shape lasts: about 0.7 ÷ zoom_rate seconds. Higher also means one big subject at a time.",
-    chips: [["near-still", 0.05], ["hold & morph", 0.2], ["one subject", 0.5], ["fast fall", 0.8]] },
-  { k: "rotate_rate", name: "Swirl", min: 0, max: 0.3, step: 0.005, tags: ["feedback"],
-    help: "Turns the picture up to 40 × this many radians and back, every ~21 s. Keep below a third of zoom_rate or the edges streak." },
+ { tab: "motion", title: "Resampling", sub: "how each moved frame is redrawn and what fills its edges", items: [
   { k: "resample", name: "Warp filter", type: "select", options: ["bilinear", "bicubic"], tags: ["feedback", "fps"],
     help: "bilinear is stable. bicubic sharpens every frame: grainy at 30 fps, melts at 60 fps." },
  ]},
@@ -390,8 +392,11 @@ const ENCODERS = [["CPU (x264, best quality)", "-c:v libx264 -preset fast -crf 1
 const SIZES = [["1920×1080", "1920", "1080"], ["1280×720", "1280", "720"], ["3840×2160", "3840", "2160"], ["960×540", "960", "540"]];
 
 // ----------------------------------------------------------------------------- state
-let saved = { render: {}, preview: {} };   // as in settings.ini
-let cur = { render: {}, preview: {} };     // edited values (strings)
+let saved = { render: {}, preview: {}, warp: {} };   // as in settings.ini
+let cur = { render: {}, preview: {}, warp: {} };     // edited values (strings); warp = the Motion tab's stack
+let warp = null;   // the Motion tab (editor/warp.js)
+const SECTIONS = ["render", "preview", "warp"];
+const withSections = s => { for (const k of SECTIONS) s[k] = s[k] || {}; return s; };
 const sectionOf = g => g.section || "render";
 
 function keysOf(it) { return it.type === "size" ? ["width", "height"] : [it.k]; }
@@ -526,7 +531,7 @@ function writeControls() {
     b.hidden = !n; b.textContent = `${n} changed`;
   });
   for (const t of CTL_TABS) {
-    const n = document.querySelectorAll(`fieldset.group[data-tab="${t}"] .ctl.changed`).length, b = $(`#tab-${t} .n`);
+    const n = document.querySelectorAll(`fieldset.group[data-tab="${t}"] .ctl.changed:not([data-wk])`).length + (t === "motion" ? changes().filter(c => c[0] === "warp").length : 0), b = $(`#tab-${t} .n`);
     b.hidden = !n; b.textContent = n; b.title = `${n} unsaved change${n > 1 ? "s" : ""}`;
   }
 }
@@ -570,12 +575,13 @@ function showMatch(el, prompt, mode) {
 
 function changes() {
   const c = [];
-  for (const sec of ["render", "preview"]) for (const k of new Set([...Object.keys(cur[sec]), ...Object.keys(saved[sec])]))
+  for (const sec of SECTIONS) for (const k of new Set([...Object.keys(cur[sec]), ...Object.keys(saved[sec])]))
     if ((cur[sec][k] ?? "") !== (saved[sec][k] ?? "")) c.push([sec, k]);
   return c;
 }
 
 function refresh() {
+  warp?.sync();
   writeControls();
   const n = changes().length;
   $("#dirty").innerHTML = n ? `<b>${n} unsaved change${n > 1 ? "s" : ""}</b>` : "All changes saved";
@@ -618,7 +624,9 @@ const BUSY = [[0.5, 0.1], [1.0, 0.3], [1.6, 0.6], [2.6, 0.8], [4, 0.9]];
 
 function readout() {
   const r = cur.render, num = k => +r[k];
-  const fps = num("fps") || 30, zoom = num("zoom_rate"), rot = num("rotate_rate"), hue = num("hue_rate");
+  const fps = num("fps") || 30, hue = num("hue_rate"), ws = warp ? warp.summary() : { classic: true };
+  let zoom = num("zoom_rate"), rot = num("rotate_rate");
+  if (!ws.classic) { zoom = Math.max(0, ws.zoom); rot = 0; }
   const sc = parseScales(r.scales) || [0.12, 0.2, 0.3];
   const bicubic = (r.resample || "bilinear") === "bicubic";
   const sharpenEff = num("sharpen") * fps / 30;
@@ -665,7 +673,7 @@ function readout() {
     <dt>Size</dt><dd>${size}, ${crowd}</dd>
     <dt>Picture</dt><dd><div class="meter"><span>calm</span><div class="track"><div class="knob" style="left:${(busy * 100).toFixed(0)}%"></div></div><span>busy</span></div>${busyWord}</dd>
     ${promptOn(r) ? `<dt>Prompt</dt><dd>${esc(r.prompt_mode || "clip")} at strength <b>${fmt(num("prompt_weight"))}</b></dd>` : ""}
-    <dt>Swirl</dt><dd>${swirl}</dd>
+    ${ws.classic ? `<dt>Swirl</dt><dd>${swirl}</dd>` : `<dt>Motion</dt><dd>${esc(ws.names.join(" + ") || "none")} <span class="status">(Motion tab)</span></dd>`}
     <dt>Colour</dt><dd>${cycle}</dd>
     <dt>Render</dt><dd>${frames} frames · about <b>${cost < 1.5 ? cost.toFixed(1) : Math.round(cost)}×</b> the work of a 24 s base test</dd>`;
 
@@ -770,9 +778,9 @@ function startPolling() { if (!polling) polling = setInterval(pollJob, 1000); po
 async function save() {
   if (!parseScales(cur.render.scales)) throw new Error("Fix scales first.");
   const body = { render: {}, preview: {} };
-  for (const [sec, k] of changes()) body[sec][k] = cur[sec][k] ?? "";
+  for (const [sec, k] of changes()) if (sec === "warp") body.warp = { ...cur.warp }; else body[sec][k] = cur[sec][k] ?? "";
   const r = await api("/api/save", body);
-  saved = r.settings; cur = JSON.parse(JSON.stringify(saved)); refresh();
+  saved = withSections(r.settings); cur = JSON.parse(JSON.stringify(saved)); refresh();
 }
 
 async function run(kind) {
@@ -789,7 +797,7 @@ async function loadState(first = false) {
       <b>The editor was updated but is still running the old version.</b> Close the editor's black window
       (wait for any running preview or render to finish first) and start 4_EDITOR.bat again.</div>`);
   }
-  if (first) { saved = s.settings; cur = JSON.parse(JSON.stringify(saved)); refresh(); }
+  if (first) { saved = withSections(s.settings); cur = JSON.parse(JSON.stringify(saved)); refresh(); }
   videos = s.videos; renderGallery();
   const u = $("#unfinished");
   u.hidden = !s.unfinished || s.job.running;
@@ -817,7 +825,8 @@ function renderGallery() {
   g.dataset.sig = sig;
   g.innerHTML = videos.map((v, i) => {
     const s = v.settings;
-    const kv = s ? `${promptOn(s) ? `prompt (${esc(s.prompt_mode || "clip")} ${esc(s.prompt_weight || 0.85)}): “${esc(s.prompt)}”<br>` : ""}${s.model || "vgg16"} · zoom ${s.zoom_rate} · strength ${s.strength} · scales ${s.scales}<br>object_bias ${s.object_bias ?? 0} · hue ${s.hue_rate} · ${s.resample || "bicubic (old)"} · seed ${s.seed}<br>${s.width}×${s.height} · ${s.fps} fps · ${s.seconds} s` : "No settings file";
+    const mo = v.warp && String(v.warp.stack || "").trim() ? `motion: ${esc(v.warp.stack)}<br>` : "";
+    const kv = s ? `${mo}${promptOn(s) ? `prompt (${esc(s.prompt_mode || "clip")} ${esc(s.prompt_weight || 0.85)}): “${esc(s.prompt)}”<br>` : ""}${s.model || "vgg16"} · zoom ${s.zoom_rate} · strength ${s.strength} · scales ${s.scales}<br>object_bias ${s.object_bias ?? 0} · hue ${s.hue_rate} · ${s.resample || "bicubic (old)"} · seed ${s.seed}<br>${s.width}×${s.height} · ${s.fps} fps · ${s.seconds} s` : "No settings file";
     return `<article class="card${lastResult && lastResult.endsWith(v.name) ? " new" : ""}">
       <video preload="metadata" controls muted loop playsinline src="/media/output/${encodeURIComponent(v.name)}#t=3"></video>
       <div class="body"><div class="title"><b>${v.num ?? "–"}</b><span class="status">${esc(v.name)} · ${(v.size / 1e6).toFixed(0)} MB</span></div>
@@ -832,6 +841,7 @@ $("#grid").addEventListener("click", e => {
   if (l) {
     const v = videos[+l.dataset.load];
     for (const [k, val] of Object.entries(v.settings)) cur.render[k] = val;
+    cur.warp = v.warp ? { ...v.warp } : {};   // no [warp] = classic zoom_rate / rotate_rate motion
     if (!v.settings.resample) cur.render.resample = "bicubic";   // made before the setting existed
     if (!v.settings.model) cur.render.model = "vgg16";
     refresh(); selectTab(ctlTab); toast(`Loaded settings of video ${v.num ?? v.name} (not saved yet)`);
@@ -890,7 +900,12 @@ function selectTab(name) {
   $("#view-gallery").hidden = name !== "gallery";
   $("#view-attngan").hidden = name !== "attngan";
   for (const t of CTL_TABS) $(`#tab-${t}`).setAttribute("aria-selected", t === name);
-  document.querySelectorAll("#groups fieldset.group").forEach(fs => fs.hidden = fs.dataset.tab !== ctlTab);
+  document.querySelectorAll("fieldset.group[data-tab]").forEach(fs => fs.hidden = fs.dataset.tab !== ctlTab);
+  // the Motion tab swaps the monitor's video for the motion preview; the save bar stays
+  $("#warp").hidden = $("#warp-side").hidden = ctlTab !== "motion";
+  $("#mon-out").hidden = ctlTab === "motion";
+  document.body.dataset.tab = ctlTab;
+  warp?.show(name === "motion");
   $("#btn-videos").setAttribute("aria-pressed", name === "gallery");
   document.body.dataset.mode = mode;
   $("#mode-title").textContent = document.title = MODES[mode];
@@ -940,12 +955,19 @@ RECIPES.forEach(([name], i) => rsel.add(new Option(name, i)));
 rsel.onchange = () => {
   if (rsel.value === "") return;
   for (const [k, v] of Object.entries(RECIPES[+rsel.value][1])) cur.render[k] = String(v);
+  warp?.applyClassic(RECIPES[+rsel.value][1].zoom_rate, RECIPES[+rsel.value][1].rotate_rate);
   pickedRecipe = +rsel.value; toast(`Applied "${RECIPES[pickedRecipe][0]}" (not saved yet)`); refresh();
 };
 document.addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); if (changes().length) $("#btn-save").click(); } });
 window.addEventListener("beforeunload", e => { if (changes().length) { e.preventDefault(); e.returnValue = ""; } });
 
 buildControls();
+warp = WarpLab.mount({
+  root: $("#warp"), side: $("#warp-side"), extra: document.querySelector('fieldset.group[data-tab="motion"]'),
+  get: () => cur.warp, saved: () => saved.warp, set: d => { cur.warp = d; refresh(); }, render: () => cur.render, toast,
+  player: $("#player"), live: $("#live"), imageUrl: p => `/api/image?token=${TOKEN}&path=${encodeURIComponent(p)}`,
+}) || WarpLab;
+selectTab(dreamTab);
 loadState(true).catch(e => { document.body.insertAdjacentHTML("afterbegin", `<div class="w bad" style="margin:12px">Could not reach the editor server: ${esc(e.message)}. Start it with 4_EDITOR.bat.</div>`); });
 </script>
 </body>

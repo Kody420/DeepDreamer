@@ -8,7 +8,7 @@ Usage (the .bat files do this for you):
 Rendering is chunked (segment_seconds). If it is interrupted, just run it again:
 finished segments are kept and it resumes where it stopped.
 """
-import os, sys, math, time, shutil, argparse, subprocess, configparser
+import os, re, sys, math, time, shutil, argparse, subprocess, configparser
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -59,6 +59,7 @@ def load_cfg(preview):
     c["prompt_cuts"] = int(base.get("prompt_cuts", 8))                  # random crops the prompt network looks at
     c["fade_seconds"] = float(base.get("fade_seconds", 1.5))
     c["encoder_args"] = base.get("encoder_args", "-c:v libx264 -preset fast -crf 14 -pix_fmt yuv420p").split()
+    c["warp"] = parse_warp(cp["warp"]) if cp.has_section("warp") else None   # None = the classic zoom_rate/rotate_rate warp
     return c
 
 
@@ -192,6 +193,240 @@ def warp(img, zoom, ang, dx, dy, mode="bilinear"):
     return F.grid_sample(img, grid, mode=mode, padding_mode="reflection", align_corners=False)
 
 
+# ----------------------------------------------------------------------------- warp stack
+# The [warp] section of settings.ini: motion modules applied top to bottom. Each one only moves the sampling
+# coordinates, so a frame is still resampled once however many there are. The maths matches the Motion tab's
+# live preview (editor/warp.js); keep the two in step. Coordinates: y up, height -1..1, width -w/h..w/h.
+# Rates are per second (divided by fps here), so 30 and 60 fps move the same.
+WARP_PARAMS = {   # kind: [(param, min, max, default)], in the order the editor shows them
+    "zoom": [("rate", -1.5, 1.5, .2), ("bend", -1, 2, 0)],
+    "spin": [("rate", -1, 1, .1)],
+    "drift": [("speed", 0, 1, .15), ("angle", -180, 180, 90)],
+    "tilt": [("tx", -1, 1, 0), ("ty", -1, 1, .35), ("shear", -1, 1, 0)],
+    "shake": [("amp", 0, .08, .015), ("rate", .2, 8, 1.5), ("roll", 0, .08, .01)],
+    "swirl": [("rate", -3, 3, 1), ("size", .05, 2, .5), ("tail", 0, 1, .3)],
+    "bulge": [("k", -3, 3, 1.2), ("size", .05, 1.5, .35), ("orbit", 0, 1.2, .5), ("speed", -3, 3, .6)],
+    "mobius": [("k", -1.5, 1.5, .35), ("spin", -2, 2, .3), ("phase", -180, 180, 0)],
+    "kaleido": [("n", 2, 16, 6), ("spin", -1, 1, .08), ("mix", 0, 1, 1)],
+    "ripple": [("amp", 0, 2, .4), ("freq", .5, 20, 5), ("speed", -12, 12, 4), ("radial", 0, 1, 1), ("angle", -180, 180, 0)],
+    "flow": [("amp", 0, 2, .4), ("scale", .3, 8, 1.6), ("speed", 0, 1.5, .2), ("detail", 0, 1, .35)],
+    "melt": [("speed", -1, 1, .25), ("angle", -180, 180, -90), ("streaks", 1, 60, 12), ("vary", 0, 1, .7), ("wobble", 0, 2, .3)],
+    "edge": [("amp", 0, 2, .6), ("angle", -180, 180, 90), ("reach", .5, 6, 2)],
+}
+WARP_CURVES = ("sine", "tri", "saw", "pulse", "noise", "ramp")
+WARP_EDGES = ("reflect", "wrap", "smear")
+
+
+def parse_warp(sec):
+    """[warp] section -> dict(stack, edge, prism), or None when its stack is empty (then the classic warp is used).
+    A value is a number, optionally followed by a motion curve:  swirl.rate = 1.2 ~ sine(period=12, depth=0.5)"""
+    bad = lambda msg: sys.exit(f"settings.ini [warp]: {msg}")
+    names = [n.strip().lower() for n in sec.get("stack", "").split(",") if n.strip()]
+    if not names:
+        return None
+    edge = sec.get("edge", "reflect").strip().lower()
+    if edge not in WARP_EDGES:
+        bad(f"edge must be one of {', '.join(WARP_EDGES)}, not '{edge}'")
+    stack = []
+    for name in names:
+        kind = name.rstrip("0123456789")          # zoom2 = a second zoom module
+        if kind not in WARP_PARAMS:
+            bad(f"unknown module '{name}' in stack (known: {', '.join(WARP_PARAMS)})")
+        if sec.get(f"{name}.on", "yes").strip().lower() in ("no", "off", "false", "0"):
+            continue
+        params = []
+        for k, lo, hi, d in WARP_PARAMS[kind]:
+            raw = sec.get(f"{name}.{k}", str(d)).strip()
+            m = re.fullmatch(r"(-?[\d.]+(?:e-?\d+)?)\s*(?:~\s*([a-z]+)\s*\(([^)]*)\))?", raw)
+            if not m:
+                bad(f"{name}.{k} = {raw} is not a number (optionally followed by ~ sine(period=..., depth=...))")
+            curve = None
+            if m.group(2):
+                if m.group(2) not in WARP_CURVES:
+                    bad(f"{name}.{k}: curve must be one of {', '.join(WARP_CURVES)}, not '{m.group(2)}'")
+                curve = dict(shape=m.group(2), period=8.0, depth=0.5, phase=0.0)
+                for part in filter(None, (s.strip() for s in m.group(3).split(","))):
+                    a, _, b = part.partition("=")
+                    if a.strip() not in ("period", "depth", "phase"):
+                        bad(f"{name}.{k}: unknown curve setting '{a.strip()}'")
+                    curve[a.strip()] = float(b)
+                curve["period"] = max(curve["period"], 0.05)
+            params.append((float(m.group(1)), lo, hi, curve))
+        pivot = [float(v) for v in sec.get(f"{name}.pivot", "0, 0").split(",")]
+        where = sec.get(f"{name}.where", "").split()   # e.g. "near 0.6 soft 0.4" / "away 0.5 soft 0.3"
+        mode = {"near": 1, "away": 2}.get(where[0], 0) if where else 0
+        radius = float(where[1]) if len(where) > 1 else .6
+        soft = float(where[3]) if len(where) > 3 else .4
+        stack.append(dict(kind=kind, params=params, pivot=pivot[:2] + [0.0] * (2 - len(pivot)), where=(mode, radius, soft)))
+    return dict(stack=stack, edge=edge, prism=float(sec.get("prism", "0")))
+
+
+def _frac(x):
+    return x - math.floor(x)
+
+
+def _vnoise1(x):   # smooth random wander for the "noise" motion curve
+    i = math.floor(x); f = x - i; u = f * f * (3 - 2 * f)
+    h = lambda n: _frac(math.sin(n * 127.1 + 11.3) * 43758.5453)
+    return h(i) * (1 - u) + h(i + 1) * u
+
+
+def curve_value(p, t, total):
+    """A parameter's value at time t: base plus its motion curve, clamped to the parameter's range."""
+    v, lo, hi, cv = p
+    if cv:
+        x = t / cv["period"] + cv["phase"]
+        s = cv["shape"]
+        if s == "ramp":
+            u = min(1.0, max(0.0, t / total)) if total > 0 else 1.0
+            v += cv["depth"] * (hi - lo) * u * u * (3 - 2 * u)
+        else:
+            w = {"sine": lambda: math.sin(2 * math.pi * x), "tri": lambda: 1 - 4 * abs(_frac(x + .25) - .5),
+                 "saw": lambda: 2 * _frac(x) - 1, "pulse": lambda: math.tanh(4 * math.sin(2 * math.pi * x)) / math.tanh(4),
+                 "noise": lambda: 2 * _vnoise1(x * 2 + cv["phase"] * 17) - 1}[s]()
+            v += cv["depth"] * (hi - lo) / 2 * w
+    return min(hi, max(lo, v))
+
+
+def _tfrac(x):
+    return x - torch.floor(x)
+
+
+def _h13(x, y, z):   # the preview shader's hash, so the noise-driven motions match it
+    x, y, z = _tfrac(x * .1031), _tfrac(y * .1031), _tfrac(z * .1031)
+    d = x * (z + 31.32) + y * (y + 31.32) + z * (x + 31.32)
+    return _tfrac((x + d + y + d) * (z + d))
+
+
+def _vn3(x, y, z):
+    dev = next((v.device for v in (x, y, z) if torch.is_tensor(v)), "cpu")
+    x, y, z = torch.broadcast_tensors(*(v if torch.is_tensor(v) else torch.tensor(float(v), device=dev) for v in (x, y, z)))
+    ix, iy, iz = torch.floor(x), torch.floor(y), torch.floor(z)
+    fx, fy, fz = x - ix, y - iy, z - iz
+    fx, fy, fz = fx * fx * (3 - 2 * fx), fy * fy * (3 - 2 * fy), fz * fz * (3 - 2 * fz)
+    h = lambda a, b, c: _h13(ix + a, iy + b, iz + c)
+    lerp = torch.lerp
+    return lerp(lerp(lerp(h(0, 0, 0), h(1, 0, 0), fx), lerp(h(0, 1, 0), h(1, 1, 0), fx), fy),
+                lerp(lerp(h(0, 0, 1), h(1, 0, 1), fx), lerp(h(0, 1, 1), h(1, 1, 1), fx), fy), fz)
+
+
+def _vn1(x):
+    return float(_vn3(torch.tensor(float(x)), torch.tensor(.37), torch.tensor(.71)))
+
+
+def _rot(x, y, a):
+    c, s = math.cos(a), math.sin(a)
+    return c * x - s * y, s * x + c * y
+
+
+def _sample(img, x, y, edge, mode):
+    """Read img at coordinates (x, y) (y up), folding positions outside the frame as the edge setting says."""
+    h, w = img.shape[-2:]
+    u, v = x / (w / h) * .5 + .5, y * .5 + .5
+    if edge == "reflect":
+        u, v = 1 - torch.abs(1 - torch.remainder(u, 2)), 1 - torch.abs(1 - torch.remainder(v, 2))
+    elif edge == "wrap":
+        u, v = _tfrac(u), _tfrac(v)
+    else:
+        u, v = u.clamp(0, 1), v.clamp(0, 1)
+    grid = torch.stack([u * 2 - 1, 1 - v * 2], -1)[None].to(img.dtype)
+    return F.grid_sample(img, grid, mode=mode, padding_mode="border", align_corners=False)
+
+
+def warp_stack(img, t, warp_cfg, dt, total, mode="bilinear"):
+    """One frame of the [warp] stack: move the sampling grid through every module, then resample once."""
+    h, w = img.shape[-2:]
+    a = w / h
+    dev = img.device
+    ys = 1 - (torch.arange(h, device=dev, dtype=torch.float32) + .5) / h * 2
+    xs = ((torch.arange(w, device=dev, dtype=torch.float32) + .5) / w * 2 - 1) * a
+    y, x = torch.meshgrid(ys, xs, indexing="ij")
+    edge, lum = warp_cfg["edge"], None
+    k30 = 30 * dt    # per-frame clamps were tuned at 30 fps
+    for m in warp_cfg["stack"]:
+        v = [curve_value(p, t, total) for p in m["params"]]
+        kind, (cx, cy) = m["kind"], m["pivot"][:2]
+        dx, dy = x - cx, y - cy
+        r2 = dx * dx + dy * dy
+        r = torch.sqrt(r2)
+        qx, qy = x, y
+        if kind == "zoom":
+            s = torch.exp(-v[0] * dt * (1 + v[1] * r2)); qx, qy = cx + dx * s, cy + dy * s
+        elif kind == "spin":
+            qx, qy = _rot(dx, dy, -v[0] * dt); qx, qy = cx + qx, cy + qy
+        elif kind == "drift":
+            an = math.radians(v[1]); qx, qy = x - math.cos(an) * v[0] * dt, y - math.sin(an) * v[0] * dt
+        elif kind == "tilt":
+            s = torch.clamp(1 + dt * 2 * (v[0] * dx + v[1] * dy), min=.2)
+            qx, qy = cx + (dx + v[2] * dt * 2 * dy) / s, cy + dy / s
+        elif kind == "shake":   # position jitter: the frame-to-frame difference of a smooth wander, so it never drifts off
+            k, k0 = t * v[1], (t - dt) * v[1]
+            jx, jy = (_vn1(k) - _vn1(k0)) * 2 * v[0], (_vn1(k + 17.3) - _vn1(k0 + 17.3)) * 2 * v[0]
+            rr = (_vn1(k + 41) - _vn1(k0 + 41)) * 2 * v[2]
+            qx, qy = _rot(x, y, -rr); qx, qy = qx + jx, qy + jy
+        elif kind == "swirl":
+            s2 = v[1] * v[1]
+            turn = -v[0] * dt * torch.lerp(torch.exp(-r2 / s2), 1 / (1 + r2 / s2), v[2])
+            c, s = torch.cos(turn), torch.sin(turn); qx, qy = cx + c * dx - s * dy, cy + s * dx + c * dy
+        elif kind == "bulge":
+            ox, oy = cx + v[2] * math.cos(v[3] * t), cy + v[2] * math.sin(v[3] * t)
+            ex, ey = x - ox, y - oy
+            s = torch.exp(-v[0] * dt * torch.exp(-(ex * ex + ey * ey) / (v[1] * v[1]))); qx, qy = ox + ex * s, oy + ey * s
+        elif kind == "mobius":   # infinitesimal Moebius flow toward a turning pole
+            ph = math.radians(v[2]) + v[1] * t; gx, gy = v[0] * math.cos(ph), v[0] * math.sin(ph)
+            zx, zy = dx * dx - dy * dy, 2 * dx * dy
+            vx, vy = (gx * zx - gy * zy) * dt, (gx * zy + gy * zx) * dt
+            L = torch.sqrt(vx * vx + vy * vy); f = torch.clamp(.08 * k30 / (L + 1e-12), max=1)
+            qx, qy = x - vx * f, y - vy * f
+        elif kind == "kaleido":
+            n = max(math.floor(v[0] + .5), 1); sp = v[1] * t; seg = 2 * math.pi / n
+            an = torch.abs(torch.remainder(torch.atan2(dy, dx) - sp, seg) - seg / 2) + sp
+            qx, qy = torch.lerp(x, cx + r * torch.cos(an), v[2]), torch.lerp(y, cy + r * torch.sin(an), v[2])
+        elif kind == "ripple":
+            an = math.radians(v[4]); lx, ly = math.cos(an), math.sin(an)
+            big = r > 1e-4
+            rx, ry = torch.where(big, dx / r.clamp(min=1e-4), torch.full_like(r, lx)), torch.where(big, dy / r.clamp(min=1e-4), torch.full_like(r, ly))
+            vx, vy = torch.lerp(torch.full_like(r, lx), rx, v[3]), torch.lerp(torch.full_like(r, ly), ry, v[3])
+            L = torch.sqrt(vx * vx + vy * vy).clamp(min=1e-4); vx, vy = vx / L, vy / L
+            s = torch.lerp(dx * lx + dy * ly, r, v[3])
+            push = v[0] * dt * torch.sin(math.pi * v[1] * s - v[2] * t)
+            qx, qy = x + vx * push, y + vy * push
+        elif kind == "flow":   # curl of a noise field: swirling currents that neither compress nor spread
+            sc, e = v[1], .04 / v[1]
+            psi = lambda px, py: _vn3(px * sc, py * sc, t * v[2]) + v[3] * .5 * _vn3(px * sc * 2.3 + 7.1, py * sc * 2.3 + 7.1, t * v[2] * 1.7 + 3.3)
+            gx, gy = psi(x + e, y) - psi(x - e, y), psi(x, y + e) - psi(x, y - e)
+            qx, qy = x + gy / (2 * e) / sc * v[0] * dt, y - gx / (2 * e) / sc * v[0] * dt
+        elif kind == "melt":
+            an = math.radians(v[1]); ux, uy = math.cos(an), math.sin(an)
+            u = (x * -uy + y * ux) * v[2] * .5
+            s = 1 + v[3] * 1.8 * (_vn3(u, (x * ux + y * uy) * .8, t * v[4]) - .5)
+            qx, qy = x - ux * v[0] * dt * s, y - uy * v[0] * dt * s
+        elif kind == "edge":   # pixels slide along (or across) the picture's own brightness contours
+            if lum is None:
+                lum = (img * torch.tensor([.3, .59, .11], device=dev, dtype=img.dtype).view(1, 3, 1, 1)).sum(1, keepdim=True)
+            e = v[2] * 2 / 288      # edge width in pixels of a 288-line frame, the preview's size
+            L = lambda px, py: _sample(lum, px, py, edge, "bilinear")[0, 0].float()
+            gx, gy = (L(x + e, y) - L(x - e, y)) / (2 * e), (L(x, y + e) - L(x, y - e)) / (2 * e)
+            vx, vy = _rot(gx, gy, math.radians(v[1]))
+            vx, vy = vx * v[0] * dt * .08, vy * v[0] * dt * .08
+            n = torch.sqrt(vx * vx + vy * vy); f = torch.clamp(.03 * k30 / (n + 1e-12), max=1)
+            qx, qy = x + vx * f, y + vy * f
+        wmode, radius, soft = m["where"]
+        if wmode:   # limit the module to a ring around its pivot (near) or to everything outside it (away)
+            lo, hi = radius * (1 - soft), radius * (1 + soft) + 1e-3
+            tt = ((r - lo) / (hi - lo)).clamp(0, 1)
+            inside = 1 - tt * tt * (3 - 2 * tt)
+            wt = inside if wmode == 1 else 1 - inside
+            qx, qy = torch.lerp(x, qx, wt), torch.lerp(y, qy, wt)
+        x, y = qx, qy
+    prism = warp_cfg["prism"] * k30
+    if prism <= 0:
+        return _sample(img, x, y, edge, mode)
+    r_ = _sample(img[:, 0:1], x * (1 + prism), y * (1 + prism), edge, mode)   # red and blue zoom slightly apart
+    b_ = _sample(img[:, 2:3], x * (1 - prism), y * (1 - prism), edge, mode)
+    return torch.cat([r_, _sample(img[:, 1:2], x, y, edge, mode), b_], 1)
+
+
 def hue_matrix(angle, dev):
     # rotation about the grey axis (1,1,1)
     c, s = math.cos(angle), math.sin(angle)
@@ -248,9 +483,14 @@ class Dreamer:
         rec = (lambda k, v: trace.__setitem__(k, v.detach().clone())) if trace is not None else (lambda k, v: None)
         rec("previous", img)
         t = f / fps
-        ang = c["rotate_rate"] * math.sin(t * 0.3) / fps * 6
-        dx, dy = 0.01 * math.sin(t * 0.7) / fps * 6, 0.01 * math.cos(t * 0.5) / fps * 6
-        img = warp(img, self.zoom, ang, dx, dy, c["resample"]); rec("warp", img)
+        if c["warp"] is not None:      # the motion stack from [warp]
+            ang = 0.0
+            img = warp_stack(img, t, c["warp"], 1.0 / fps, c["seconds"], c["resample"])
+        else:                          # classic: zoom_rate plus the rotate_rate wobble
+            ang = c["rotate_rate"] * math.sin(t * 0.3) / fps * 6
+            dx, dy = 0.01 * math.sin(t * 0.7) / fps * 6, 0.01 * math.cos(t * 0.5) / fps * 6
+            img = warp(img, self.zoom, ang, dx, dy, c["resample"])
+        rec("warp", img)
         img = sharpen(img, c["sharpen"] / 2); rec("sharpen", img)
         img = img + self.noise * torch.randn_like(img); rec("noise", img)
         img = torch.einsum("ij,bjhw->bihw", self.hue, img).clamp(0, 1); rec("hue", img)
@@ -326,6 +566,8 @@ def main():
     os.makedirs(work, exist_ok=True)
     dreamer = Dreamer(c, dev)          # builds the network before seeding, as before
     print("Model:", c["model"])
+    if c["warp"] is not None:
+        print("Motion:", " + ".join(m["kind"] for m in c["warp"]["stack"]) or "none (empty stack)")
     if dreamer.guide is not None:
         print(f"Prompt ({c['prompt_weight']:g}):", dreamer.guide.description)
     live = os.path.join(work, "live.jpg")    # latest frame, for the editor's live view

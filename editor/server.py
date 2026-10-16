@@ -20,7 +20,7 @@ IMAGE_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", "
              ".webp": "image/webp", ".tif": "image/tiff", ".tiff": "image/tiff", ".gif": "image/gif"}
 PY = os.path.join(ROOT, "venv", "Scripts", "python.exe")
 PORT = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else int(os.environ.get("DREAM_EDITOR_PORT", "8765"))
-VERSION = 4                   # bump with every change to the API; index.html checks it
+VERSION = 5                   # bump with every change to the API; index.html checks it
 TOKEN = secrets.token_hex(16)   # every API call must carry it, so other web pages can't drive the editor
 
 
@@ -28,13 +28,39 @@ TOKEN = secrets.token_hex(16)   # every API call must carry it, so other web pag
 def read_settings(path=INI):
     cp = configparser.ConfigParser(inline_comment_prefixes=("#", ";"), interpolation=None)
     cp.read(path, encoding="utf-8")
-    return {sec: {k: v.strip() for k, v in cp[sec].items()} for sec in ("render", "preview") if sec in cp}
+    return {sec: {k: v.strip() for k, v in cp[sec].items()} for sec in ("render", "preview", "warp") if sec in cp}
+
+
+def replace_warp(lines, vals):
+    """The [warp] section (the Motion tab's stack) is always written whole: modules come and go, so updating it
+    key by key would leave old ones behind. An empty dict removes it, which brings back the classic warp."""
+    start = next((i for i, l in enumerate(lines) if re.match(r"^\s*\[warp\]\s*$", l)), None)
+    if start is not None:
+        end = next((i for i in range(start + 1, len(lines)) if re.match(r"^\s*\[.+\]\s*$", lines[i])), len(lines))
+        while end > start and not lines[end - 1].strip():
+            end -= 1
+        del lines[start:end]
+        while start < len(lines) and start > 0 and not lines[start - 1].strip() and not lines[start].strip():
+            del lines[start]          # don't leave a double blank line where the section was
+    if not vals:
+        return lines
+    block = ["[warp]", "; motion stack from the editor's Motion tab: modules run top to bottom (see README)"]
+    block += [f"{k} = {v}" for k, v in vals.items()]
+    if start is None:   # new: put it after [render], before [preview]
+        start = next((i for i, l in enumerate(lines) if re.match(r"^\s*\[preview\]\s*$", l)), len(lines))
+        while start > 0 and not lines[start - 1].strip():
+            start -= 1
+        block = [""] + block
+    lines[start:start] = block + ([""] if start < len(lines) and lines[start].strip() else [])
+    return lines
 
 
 def write_settings(new):
     """Update values in place so comments and layout survive; append keys the file doesn't have yet."""
     with open(INI, encoding="utf-8") as fh:
         lines = fh.read().splitlines()
+    if "warp" in new:
+        lines = replace_warp(lines, new.pop("warp"))
     sec, seen, last_key_line = None, {}, {}
     out = []
     for line in lines:
@@ -179,8 +205,9 @@ def list_videos():
         m = re.match(r"^(\d+)-", name)
         ini = os.path.splitext(p)[0] + "_settings.ini"
         st = os.stat(p)
+        s = read_settings(ini) if os.path.exists(ini) else {}
         vids.append(dict(name=name, num=int(m.group(1)) if m else None, size=st.st_size, mtime=st.st_mtime,
-                         settings=read_settings(ini).get("render") if os.path.exists(ini) else None))
+                         settings=s.get("render"), warp=s.get("warp")))
     vids.sort(key=lambda v: (v["num"] is None, -(v["num"] or 0), -v["mtime"]))
     return vids
 
@@ -267,6 +294,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, fh.read().replace("__TOKEN__", TOKEN), "text/html; charset=utf-8")
         if path.startswith("/media/"):
             return self._media(path[len("/media/"):])
+        if path in ("/warp.js", "/warp.css"):   # the Motion tab's stack editor and live preview
+            with open(os.path.join(os.path.dirname(__file__), path[1:]), encoding="utf-8") as fh:
+                return self._send(200, fh.read(), "text/javascript; charset=utf-8" if path.endswith(".js") else "text/css; charset=utf-8")
         if path == "/api/image":   # thumbnail of the start image; <img> can't send headers, so the token is in the query
             q = parse_qs(urlparse(self.path).query)
             if q.get("token", [""])[0] != TOKEN:
@@ -310,7 +340,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, "path": saved})
             data = json.loads(self.rfile.read(n) or b"{}")
             if path == "/api/save":
-                write_settings({s: {k: v for k, v in vals.items()} for s, vals in data.items() if s in ("render", "preview")})
+                write_settings({s: {k: v for k, v in vals.items()} for s, vals in data.items() if s in ("render", "preview", "warp")})
                 return self._send(200, {"ok": True, "settings": read_settings()})
             if path == "/api/run":
                 JOB.start(data.get("kind"), data)
