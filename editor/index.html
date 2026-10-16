@@ -1,0 +1,836 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepDreamer Editor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a mixing desk. Controls scroll on the left in labelled channel groups; the monitor (video, readout,
+   transport buttons) stays fixed on the right. One deliberate dark look, since the work is glowing video. */
+:root {
+  --bg: #0d0f13; --panel: #151820; --panel-2: #1b1f29; --line: #272c38; --fg: #e7e9ee; --muted: #9399a8;
+  --accent: #3fc6bd; --accent-ink: #062523; --accent-soft: #10302e; --warn: #f0a24a; --warn-soft: #34250f;
+  --bad: #ff6b6b; --bad-soft: #3a1717; --info-soft: #1d2433; --changed: #f5d76e;
+  --display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  color-scheme: dark;
+}
+* { box-sizing: border-box }
+[hidden] { display: none !important }
+html, body { height: 100% }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 var(--body) }
+button, input, select { font: inherit; color: inherit }
+code, .mono { font-family: var(--mono); font-size: .9em }
+a { color: var(--accent) }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+
+header.top { display: flex; align-items: center; gap: 18px; padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; flex-wrap: wrap }
+header.top h1 { font: 700 20px/1 var(--display); margin: 0; letter-spacing: -.01em }
+.tabs { display: flex; gap: 4px }
+.tabs button { background: none; border: 0; padding: 7px 12px; border-radius: 8px; color: var(--muted); cursor: pointer; font-weight: 600 }
+.tabs button[aria-selected="true"] { background: var(--panel-2); color: var(--fg) }
+.spacer { flex: 1 }
+.status { font-size: 13px; color: var(--muted) }
+.status b { color: var(--changed) }
+
+.btn { border: 1px solid var(--line); background: var(--panel-2); border-radius: 8px; padding: 7px 14px; cursor: pointer; font-weight: 600 }
+.btn:hover:not(:disabled) { border-color: var(--accent) }
+.btn:disabled { opacity: .45; cursor: not-allowed }
+.btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent) }
+.btn.danger { border-color: var(--bad); color: var(--bad); background: none }
+.btn.small { padding: 3px 9px; font-size: 13px }
+
+main.editor { display: grid; grid-template-columns: minmax(0, 1fr) 470px; gap: 0; height: calc(100% - 57px) }
+.controls { overflow: auto; padding: 18px 22px 60px }
+.monitor { border-left: 1px solid var(--line); background: var(--panel); overflow: auto; padding: 16px 18px 40px; display: flex; flex-direction: column; gap: 16px }
+
+.recipes-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px }
+.recipes-bar label { font-weight: 600 }
+select, input[type=text], input[type=number] { background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px }
+input[type=number] { width: 84px; font-family: var(--mono); font-size: 13px; text-align: right }
+input[type=text] { font-family: var(--mono); font-size: 13px }
+textarea { flex: 1; min-width: 0; background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; padding: 6px 8px; font: 14px/1.4 var(--body); color: inherit; resize: vertical }
+.viewer .screen { position: relative }
+.viewer .screen img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; border-radius: 8px }
+.enlarge { position: absolute; top: 8px; right: 8px; z-index: 2; background: rgba(13,15,19,.75) }
+.screen.big { position: fixed; inset: 0; z-index: 30; background: #000; display: grid; place-items: center }
+.screen.big video, .screen.big img { position: absolute; inset: 0; width: 100%; height: 100%; aspect-ratio: auto; object-fit: contain; border-radius: 0 }
+.screen.big .live-badge { top: 14px; left: 14px; z-index: 2 }
+.screen.big .enlarge { top: 14px; right: 14px }
+.live-badge { position: absolute; top: 8px; left: 8px; background: var(--bad); color: #fff; font: 700 11px/1 var(--body); letter-spacing: .08em; padding: 4px 7px; border-radius: 4px }
+
+fieldset.group { border: 0; padding: 0; margin: 22px 0 0 }
+fieldset.group legend { font: 700 17px/1 var(--display); padding: 0; margin-bottom: 10px; display: flex; gap: 10px; align-items: baseline }
+fieldset.group legend span { font: 400 13px var(--body); color: var(--muted) }
+.ctl { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 4px 16px; padding: 10px 12px; border-radius: 10px; background: var(--panel); border: 1px solid transparent; margin-bottom: 6px }
+.ctl.changed { border-color: color-mix(in srgb, var(--changed) 55%, transparent) }
+.ctl.dimmed { opacity: .5 }
+fieldset.group.off legend { color: var(--muted) }
+fieldset.group.off .ctl { background: var(--bg); border-color: var(--line) }
+.ctl.locked { opacity: .45; filter: grayscale(1) }
+.ctl.locked, .ctl.locked * { cursor: not-allowed }
+.ctl.locked .help, .ctl.locked [data-match] { user-select: none }
+.ctl .name { display: flex; flex-direction: column; gap: 2px }
+.ctl .name code { font-weight: 600; font-size: 13.5px }
+.ctl .name .friendly { color: var(--muted); font-size: 13px }
+.ctl .input { display: flex; gap: 10px; align-items: center; min-width: 0 }
+.ctl .input input[type=range] { flex: 1; min-width: 80px; accent-color: var(--accent) }
+.ctl .input input[type=text] { flex: 1; min-width: 0 }
+.ctl .help { grid-column: 2; color: var(--muted); font-size: 13.5px }
+.ctl .tags { display: flex; gap: 5px; flex-wrap: wrap }
+.tag { font: 600 10px/1 var(--body); letter-spacing: .06em; text-transform: uppercase; padding: 4px 6px; border-radius: 999px; background: var(--info-soft); color: var(--muted) }
+.tag.feedback { background: var(--accent-soft); color: var(--accent) }
+.tag.fps { background: var(--warn-soft); color: var(--warn) }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; grid-column: 2 }
+.chip { border: 1px solid var(--line); background: none; border-radius: 999px; padding: 2px 9px; font-size: 12.5px; cursor: pointer; color: var(--muted) }
+.chip:hover { color: var(--fg); border-color: var(--accent) }
+.revert { visibility: hidden; border: 0; background: none; color: var(--changed); cursor: pointer; font-size: 12px; padding: 0; align-self: flex-start }
+.ctl.changed .revert { visibility: visible }
+.bad-input { border-color: var(--bad) !important }
+.imgprev { grid-column: 2; display: flex; gap: 12px; align-items: center }
+.imgprev img { width: 160px; max-width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; border: 1px solid var(--line) }
+.ctl.drop { border-color: var(--accent); background: var(--accent-soft) }
+
+.viewer video { width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 8px; display: block }
+.viewer .vbar { display: flex; gap: 8px; align-items: center; margin-top: 6px; font-size: 13px; color: var(--muted); flex-wrap: wrap }
+.transport { display: flex; gap: 8px; flex-wrap: wrap }
+.progress { height: 8px; background: var(--panel-2); border-radius: 999px; overflow: hidden }
+.progress > div { height: 100%; width: 0; background: var(--accent); transition: width .4s }
+.jobline { font-size: 13px; color: var(--muted); display: flex; justify-content: space-between; gap: 10px; margin-top: 6px; font-variant-numeric: tabular-nums }
+details.log summary { cursor: pointer; color: var(--muted); font-size: 13px }
+details.log pre { font: 12px/1.45 var(--mono); background: #090b0e; border-radius: 8px; padding: 10px; max-height: 220px; overflow: auto; white-space: pre-wrap; margin: 6px 0 0 }
+.note { border-radius: 8px; padding: 9px 11px; font-size: 13.5px; background: var(--info-soft) }
+
+.readout h2, .monitor h2 { font: 700 15px/1 var(--display); margin: 0 0 10px; letter-spacing: .01em }
+.facts { display: grid; grid-template-columns: auto 1fr; gap: 7px 14px; font-size: 14px }
+.facts dt { color: var(--muted) }
+.facts dd { margin: 0; font-variant-numeric: tabular-nums }
+.facts dd b { font-family: var(--display); font-size: 16px }
+.meter { display: flex; align-items: center; gap: 8px }
+.meter .track { flex: 1; height: 6px; border-radius: 999px; background: linear-gradient(90deg, var(--accent-soft), var(--panel-2)); position: relative }
+.meter .knob { position: absolute; top: -4px; width: 14px; height: 14px; border-radius: 50%; background: var(--accent); transform: translateX(-50%) }
+.meter span { font-size: 12px; color: var(--muted); width: 38px }
+.warnings { display: flex; flex-direction: column; gap: 6px; margin-top: 12px }
+.w { border-radius: 8px; padding: 8px 10px; font-size: 13.5px; background: var(--info-soft) }
+.w.warn { background: var(--warn-soft); color: #ffd8a8 }
+.w.bad { background: var(--bad-soft); color: #ffc9c9 }
+.w b { font-weight: 600 }
+
+.gallery { padding: 20px 22px 60px; overflow: auto; height: calc(100% - 57px) }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: 16px; margin-top: 14px }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column }
+.card video { width: 100%; aspect-ratio: 16 / 9; background: #000; display: block }
+.card .body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 6px }
+.card .title { display: flex; justify-content: space-between; gap: 8px; align-items: baseline }
+.card .title b { font: 700 18px var(--display) }
+.card .kv { font: 12px/1.5 var(--mono); color: var(--muted) }
+.card.new { border-color: var(--accent) }
+.ag-form { display: flex; flex-direction: column; gap: 10px; max-width: 900px; margin-top: 14px }
+.ag-form textarea { font-size: 16px }
+.ag-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center }
+.ag-row label { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 14px }
+.ag-card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; margin-top: 14px; display: grid; gap: 10px }
+.ag-stages { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap }
+.ag-stages figure { margin: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted) }
+.ag-stages img { image-rendering: pixelated; width: 256px; max-width: 100%; border-radius: 6px; display: block }
+.ag-stages .arrow { color: var(--muted); font-size: 20px; align-self: center }
+.ag-card details img { max-width: 100%; border-radius: 6px; display: block; margin-top: 8px }
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--panel-2); border: 1px solid var(--line); padding: 9px 16px; border-radius: 10px; z-index: 20 }
+
+@media (max-width: 1000px) {
+  main.editor { grid-template-columns: minmax(0, 1fr); height: auto }
+  .monitor { border-left: 0; border-top: 1px solid var(--line); order: -1 }
+  .ctl { grid-template-columns: minmax(0, 1fr) }
+  .ctl .help, .chips, .imgprev { grid-column: 1 }
+}
+@media (prefers-reduced-motion: reduce) { .progress > div { transition: none } }
+</style>
+</head>
+<body>
+<header class="top">
+  <h1>DeepDreamer</h1>
+  <div class="tabs" role="tablist">
+    <button role="tab" id="tab-editor" aria-selected="true" aria-controls="view-editor">Editor</button>
+    <button role="tab" id="tab-gallery" aria-selected="false" aria-controls="view-gallery">Videos</button>
+    <button role="tab" id="tab-attngan" aria-selected="false" aria-controls="view-attngan">Text to image</button>
+  </div>
+  <span class="spacer"></span>
+  <span class="status" id="dirty">All changes saved</span>
+  <button class="btn" id="btn-revert" disabled>Revert</button>
+  <button class="btn primary" id="btn-save" disabled>Save settings.ini</button>
+</header>
+
+<main class="editor" id="view-editor" role="tabpanel" aria-labelledby="tab-editor">
+  <section class="controls" aria-label="Settings">
+    <div class="recipes-bar">
+      <label for="recipe">Start from a recipe</label>
+      <select id="recipe"><option value="">Choose…</option></select>
+      <span class="status">Only the recipe's settings change; everything else stays as it is.</span>
+    </div>
+    <div id="groups"></div>
+    <p class="status" style="margin-top:28px">Measured guidance from the <a href="https://claude.ai/artifact/4hQLch6YL9zqVKKWzGNRvt" target="_blank" rel="noopener">DeepDreamer Settings Atlas</a>. Single renders vary a lot with the seed; treat the numbers as typical values.</p>
+  </section>
+
+  <aside class="monitor" aria-label="Monitor">
+    <div class="viewer">
+      <div class="screen"><video id="player" controls loop muted playsinline></video>
+        <img id="live" alt="The frame being dreamed right now" hidden><span class="live-badge" id="live-badge" hidden>LIVE</span>
+        <button class="btn small enlarge" id="btn-enlarge" type="button" title="Enlarge (Esc to close)" aria-label="Enlarge the viewer">⤢ Enlarge</button></div>
+      <div class="vbar"><span id="playing">Nothing loaded yet. Run a preview.</span><span class="spacer"></span>
+        <button class="btn small" id="show-preview">Preview</button><button class="btn small" id="show-latest">Latest render</button></div>
+    </div>
+
+    <div>
+      <div class="transport">
+        <button class="btn" id="btn-preview" title="Saves, then renders a short low-resolution test with the [preview] size">Save &amp; preview</button>
+        <button class="btn primary" id="btn-render" title="Saves, then renders the full video. Finished videos are numbered in output\">Save &amp; render</button>
+        <button class="btn danger" id="btn-stop" disabled>Stop</button>
+      </div>
+      <div style="margin-top:10px" class="progress" aria-hidden="true"><div id="bar"></div></div>
+      <div class="jobline"><span id="jobtext">Idle</span><span id="jobtime"></span></div>
+      <div id="unfinished" class="note" hidden style="margin-top:8px"></div>
+      <details class="log"><summary>Log</summary><pre id="log"></pre></details>
+    </div>
+
+    <div class="readout">
+      <h2>What to expect</h2>
+      <dl class="facts" id="facts"></dl>
+      <div class="warnings" id="warnings"></div>
+    </div>
+  </aside>
+</main>
+
+<section class="gallery" id="view-gallery" role="tabpanel" aria-labelledby="tab-gallery" hidden>
+  <h2 style="font:700 22px var(--display);margin:0">Videos in output\</h2>
+  <p class="status">"Load settings" copies a video's settings into the editor. Nothing is saved until you press Save.</p>
+  <div class="grid" id="grid"></div>
+</section>
+
+<section class="gallery" id="view-attngan" role="tabpanel" aria-labelledby="tab-attngan" hidden>
+  <h2 style="font:700 22px var(--display);margin:0">Text to image · AttnGAN (2018)</h2>
+  <p class="status" style="max-width:80ch">A text-to-image GAN from the same era as the dreaming networks. It draws a 64×64 sketch, then refines it to 128 and 256 pixels,
+    looking at the words of your sentence as it goes. <b>birds</b> only draws birds but does them well; <b>coco</b> tries everyday scenes and is very rough.
+    Unknown words are ignored. Any result can become the start image of a dream video.</p>
+  <div class="ag-form">
+    <textarea id="ag-prompt" rows="2">this bird has a red crown, black wings and a short yellow beak</textarea>
+    <div class="ag-row">
+      <label>Model <select id="ag-dataset"><option value="birds">birds</option><option value="coco">coco (scenes)</option></select></label>
+      <label>Variations <input type="number" id="ag-count" min="1" max="8" value="4"></label>
+      <label>Seed <input type="number" id="ag-seed" value="1"></label>
+      <button class="btn small" type="button" id="ag-dice">New seed</button>
+      <button class="btn primary" type="button" id="ag-go">Generate</button>
+    </div>
+    <div class="chips" style="grid-column:auto">
+      <button class="chip" type="button" data-ag="birds|this bird has a red crown, black wings and a short yellow beak">red-crowned bird</button>
+      <button class="chip" type="button" data-ag="birds|a small blue bird with white belly and a pointed beak">blue bird</button>
+      <button class="chip" type="button" data-ag="birds|this yellow bird has black stripes on its wings and a black head">yellow bird</button>
+      <button class="chip" type="button" data-ag="coco|a red double decker bus driving down a city street">bus</button>
+      <button class="chip" type="button" data-ag="coco|a herd of zebras standing in a grassy field">zebras</button>
+      <button class="chip" type="button" data-ag="coco|a bowl of fruit on a wooden table">fruit</button>
+    </div>
+  </div>
+  <p class="status" id="ag-status"></p>
+  <div id="ag-results"></div>
+</section>
+
+<div class="toast" id="toast" hidden></div>
+
+<script>
+const TOKEN = "__TOKEN__";
+const EDITOR_VERSION = 4;   // must match VERSION in server.py
+const api = async (path, body) => {
+  const r = await fetch(path, body === undefined ? { headers: { "X-Token": TOKEN } }
+    : { method: "POST", headers: { "X-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+};
+const $ = s => document.querySelector(s);
+const fmt = (v, d = 4) => (+(+v).toFixed(d)).toString();
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function toast(msg) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 2600); }
+
+// ----------------------------------------------------------------------------- schema
+// tags: feedback = changes what the network paints; output = saved frames only; fps = per frame, doubles at 60 fps
+const GROUPS = [
+ { title: "Prompt", sub: "steer the dream toward words (empty = plain dreaming)", items: [
+  { k: "prompt", name: "Prompt", type: "prompt", tags: ["feedback"],
+    help: "clip: any description. imagenet: object names separated by commas (only the 1000 ImageNet classes count).",
+    chips: [["jellyfish ocean", "glowing jellyfish in a deep blue ocean"], ["city", "a futuristic city at night, neon lights"],
+            ["forest", "an enchanted forest with mushrooms"], ["classes", "volcano, castle, peacock"]] },
+  { k: "prompt_mode", name: "Prompt network", type: "select", options: ["none", "clip", "imagenet"], tags: ["feedback"],
+    help: "none = prompt off, only the dream network (the prompt text is kept for later). clip = CLIP RN50 (2021) understands free text. imagenet = the dreaming network's own classifier (vgg16/googlenet), 2014-style, object names only." },
+  { k: "prompt_weight", name: "Prompt strength", min: 0, max: 1, step: 0.01, tags: ["feedback"],
+    help: "0 ignores the prompt, 1 is prompt only. Below ~0.6 the dream wins; 0.8–0.95 gives clearly visible results (softer than plain dreaming).",
+    chips: [["hint", 0.6], ["clear", 0.85], ["strong", 0.95]] },
+  { k: "prompt_cuts", name: "Crops per frame", min: 1, max: 16, step: 1, int: true, tags: ["feedback"],
+    help: "How many random views of the frame the prompt network checks each frame. More = steadier but slower." },
+ ]},
+ { title: "Motion", sub: "how the camera falls into the picture", items: [
+  { k: "zoom_rate", name: "Zoom speed", min: 0, max: 2, step: 0.01, tags: ["feedback"],
+    help: "Main dial for how long a shape lasts: about 0.7 ÷ zoom_rate seconds. Higher also means one big subject at a time.",
+    chips: [["near-still", 0.05], ["hold & morph", 0.2], ["one subject", 0.5], ["fast fall", 0.8]] },
+  { k: "rotate_rate", name: "Swirl", min: 0, max: 0.3, step: 0.005, tags: ["feedback"],
+    help: "Turns the picture up to 40 × this many radians and back, every ~21 s. Keep below a third of zoom_rate or the edges streak." },
+  { k: "resample", name: "Warp filter", type: "select", options: ["bilinear", "bicubic"], tags: ["feedback", "fps"],
+    help: "bilinear is stable. bicubic sharpens every frame: grainy at 30 fps, melts at 60 fps." },
+ ]},
+ { title: "Dream", sub: "what the network paints and how hard", items: [
+  { k: "model", name: "Network", type: "select", options: ["vgg16", "googlenet"], tags: ["feedback"],
+    help: "Which trained network dreams. vgg16 = the look measured in the atlas. googlenet = the network of the original 2015 DeepDream (dog-slug look); the guidance numbers here were measured with vgg16." },
+  { k: "scales", name: "Painting sizes", type: "scales", tags: ["feedback"],
+    help: "Comma-separated. Smaller numbers paint bigger things; the smallest matters most. 0.5 and up stay soft unless strength is high.",
+    chips: [["giant", "0.06,0.1,0.15"], ["big", "0.12,0.2,0.3"], ["medium", "0.2,0.35,0.5"], ["fine", "0.4,0.7,1.0"]] },
+  { k: "strength", name: "Strength", min: 0.2, max: 4, step: 0.05, tags: ["feedback"],
+    help: "How hard and fast the network takes over: shorter intro and busier picture as it rises. Barely changes how long shapes last." },
+  { k: "object_bias", name: "Kind of things", min: 0, max: 1, step: 0.01, tags: ["feedback"],
+    help: "0 eyes and spirals · 0.5 birds and feathers · 0.8 glossy eggs, faces, objects · 1 whole animals and objects.",
+    chips: [["eyes", 0], ["birds", 0.5], ["eggs & faces", 0.8], ["animals", 1]] },
+  { k: "layer_period", name: "Layer cycle (s)", min: 0.5, max: 60, step: 0.5, tags: ["feedback"],
+    help: "Seconds per cycle through textures → eyes → objects. Ignored when object_bias is 1, weak above 0.8." },
+  { k: "steps", name: "Steps per frame", min: 1, max: 4, step: 1, int: true, tags: ["feedback", "fps"],
+    help: "2 looks like double strength and renders twice as slowly. Raise strength instead." },
+  { k: "sharpen", name: "Sharpen", min: 0, max: 0.5, step: 0.01, tags: ["feedback", "fps"],
+    help: "Crisper scales and eyes, shorter intro, a little busier. Twice as strong at 60 fps; above ~0.3 grain builds up." },
+  { k: "noise", name: "Fresh noise", min: 0, max: 0.06, step: 0.001, tags: ["feedback"],
+    help: "0–0.01 makes no visible difference. 0.05 slows the start and dulls colours." },
+ ]},
+ { title: "Colour & light", sub: "working image and final grade", items: [
+  { k: "hue_rate", name: "Colour cycling", min: 0, max: 1.5, step: 0.01, tags: ["feedback"],
+    help: "A full colour cycle takes 6.3 ÷ hue_rate s. The network sees the colours, so faster cycling also changes what appears." },
+  { k: "target_mean", name: "Brightness", min: 0.05, max: 0.6, step: 0.01, tags: ["feedback"],
+    help: "0.1–0.2 dark and glowing; 0.3–0.45 bright pastel, leans to objects." },
+  { k: "target_std", name: "Working contrast", min: 0.08, max: 0.4, step: 0.01, tags: ["feedback"],
+    help: "Acts like an inverse strength: low = muted and fast takeover, high = punchy but slow to form." },
+  { k: "saturation", name: "Output saturation", min: 0, max: 2.5, step: 0.05, tags: ["output"],
+    help: "Applied to the saved frames only. Never changes the shapes." },
+  { k: "contrast", name: "Output contrast", min: 0.5, max: 1.6, step: 0.05, tags: ["output"],
+    help: "Applied to the saved frames only. Below 1 flatter and softer, above 1 punchier." },
+ ]},
+ { title: "Start", sub: "", items: [
+  { k: "seed", name: "Seed", type: "seed", tags: ["start"],
+    help: "Picks the starting noise and so the whole sequence of things. Same look, different video." },
+  { k: "init_image", name: "Start image", type: "image", tags: ["start"], placeholder: "empty = start from noise",
+    help: "Optional photo to start from instead of noise; its layout guides the first few seconds. Choose or drop an image (it is copied to init_images\\), or type a path." },
+ ]},
+ { title: "Video", sub: "the full render", items: [
+  { k: "size", name: "Size", type: "size", tags: [], help: "1280×720 looked the same in tests and renders much faster." },
+  { k: "fps", name: "Frames per second", type: "select", options: ["24", "30", "60"], tags: [],
+    help: "Motion is set per second, so 60 fps looks the same as 30, just smoother and twice as slow to render." },
+  { k: "seconds", name: "Length (s)", min: 3, max: 300, step: 1, tags: [], help: "Allow 5–8 s for the intro of balls and tubes before shapes form." },
+  { k: "fade_seconds", name: "Fade in/out (s)", min: 0, max: 5, step: 0.1, tags: ["output"], help: "" },
+  { k: "encoder_args", name: "Encoder", type: "encoder", tags: ["output"],
+    help: "NVIDIA encodes much faster with similar quality." },
+  { k: "segment_seconds", name: "Save progress every (s)", min: 5, max: 120, step: 5, tags: [], help: "Only affects how much is redone if a render is interrupted." },
+  { k: "output", name: "File name", type: "text", tags: [], help: "Finished renders are renamed to NN-dream_<height>p<fps>.mp4 anyway." },
+ ]},
+ { title: "Preview", sub: "Save & preview uses these instead", section: "preview", items: [
+  { k: "size", name: "Size", type: "size", tags: [], help: "" },
+  { k: "fps", name: "Frames per second", type: "select", options: ["24", "30", "60"], tags: [], help: "" },
+  { k: "seconds", name: "Length (s)", min: 2, max: 60, step: 1, tags: [], help: "At least 8–10 s, or you only see the intro." },
+ ]},
+];
+
+const RECIPES = [
+  ["Big creatures that hold, then morph", { zoom_rate: 0.2, strength: 1.0, scales: "0.12,0.2,0.3", object_bias: 1.0, hue_rate: 0.15, rotate_rate: 0.02 }],
+  ["Slow, almost still", { zoom_rate: 0.05, hue_rate: 0, rotate_rate: 0 }],
+  ["Falling fast", { zoom_rate: 0.8, scales: "0.1,0.2,0.3", strength: 1.3 }],
+  ["Giant single subjects", { scales: "0.06,0.1,0.15", zoom_rate: 0.2 }],
+  ["Classic DeepDream eyes", { object_bias: 0, layer_period: 14, scales: "0.12,0.2,0.3" }],
+  ["Dense psychedelic texture", { scales: "0.4,0.7,1.0", strength: 2.6, sharpen: 0.1, object_bias: 0 }],
+  ["Objects instead of animals", { object_bias: 0.8, scales: "0.2,0.35,0.5" }],
+  ["Shorter intro", { strength: 1.6 }],
+];
+const ENCODERS = [["CPU (x264, best quality)", "-c:v libx264 -preset fast -crf 14 -pix_fmt yuv420p"],
+                  ["NVIDIA (fast)", "-c:v h264_nvenc -preset p5 -cq 16 -pix_fmt yuv420p"]];
+const SIZES = [["1920×1080", "1920", "1080"], ["1280×720", "1280", "720"], ["3840×2160", "3840", "2160"], ["960×540", "960", "540"]];
+
+// ----------------------------------------------------------------------------- state
+let saved = { render: {}, preview: {} };   // as in settings.ini
+let cur = { render: {}, preview: {} };     // edited values (strings)
+const sectionOf = g => g.section || "render";
+
+function keysOf(it) { return it.type === "size" ? ["width", "height"] : [it.k]; }
+
+function buildControls() {
+  const wrap = $("#groups"); wrap.innerHTML = "";
+  for (const g of GROUPS) {
+    const fs = document.createElement("fieldset"); fs.className = "group";
+    fs.innerHTML = `<legend>${esc(g.title)}${g.sub ? `<span>${esc(g.sub)}</span>` : ""}</legend>`;
+    for (const it of g.items) fs.appendChild(control(it, sectionOf(g)));
+    wrap.appendChild(fs);
+  }
+}
+
+function control(it, sec) {
+  const id = `${sec}-${it.k}`;
+  const el = document.createElement("div"); el.className = "ctl"; el.dataset.sec = sec; el.dataset.k = it.k;
+  const tags = it.tags.map(t => `<span class="tag ${t}">${{ feedback: "changes the dream", output: "output only", fps: "per frame", start: "start" }[t]}</span>`).join("");
+  let input = "";
+  if (it.type === "select") input = `<select id="${id}">${it.options.map(o => `<option>${o}</option>`).join("")}</select>`;
+  else if (it.type === "text") input = `<input type="text" id="${id}" placeholder="${esc(it.placeholder || "")}">`;
+  else if (it.type === "scales") input = `<input type="text" id="${id}" spellcheck="false">`;
+  else if (it.type === "prompt") input = `<textarea id="${id}" rows="2" placeholder="e.g. glowing jellyfish in a deep blue ocean"></textarea>`;
+  else if (it.type === "image") input = `<input type="text" id="${id}" spellcheck="false" placeholder="${esc(it.placeholder)}">
+      <button class="btn small" type="button" data-pick>Choose image…</button><button class="btn small" type="button" data-clear>Clear</button>
+      <input type="file" accept="image/*" hidden data-file aria-label="Choose a start image">`;
+  else if (it.type === "seed") input = `<input type="number" id="${id}" step="1" style="width:110px"><button class="btn small" type="button" data-dice>New seed</button>`;
+  else if (it.type === "size") input = `<select id="${id}-preset">${SIZES.map(s => `<option value="${s[1]}x${s[2]}">${s[0]}</option>`).join("")}<option value="custom">Custom</option></select>
+      <input type="number" id="${id}-w" min="64" step="2" aria-label="width"> × <input type="number" id="${id}-h" min="64" step="2" aria-label="height">`;
+  else if (it.type === "encoder") input = `<select id="${id}-preset">${ENCODERS.map(e => `<option value="${esc(e[1])}">${esc(e[0])}</option>`).join("")}<option value="custom">Custom</option></select><input type="text" id="${id}" spellcheck="false">`;
+  else input = `<input type="range" id="${id}-r" min="${it.min}" max="${it.max}" step="${it.step}" aria-label="${esc(it.name)}"><input type="number" id="${id}" min="${it.min}" step="${it.step}">`;
+  el.innerHTML = `<div class="name"><label for="${it.type === "size" || it.type === "encoder" ? id + "-preset" : id}"><code>${esc(it.type === "size" ? "width / height" : it.k)}</code></label>
+      <span class="friendly">${esc(it.name)}</span><div class="tags">${tags}</div><button class="revert" type="button">revert</button></div>
+    <div class="input">${input}</div>${it.help ? `<div class="help">${esc(it.help)}</div>` : ""}
+    ${it.chips ? `<div class="chips">${it.chips.map(c => `<button class="chip" type="button" data-v="${esc(c[1])}">${esc(c[0])} <span class="mono">${esc(c[1])}</span></button>`).join("")}</div>` : ""}
+    ${it.type === "image" ? `<div class="imgprev"><img data-thumb alt="Start image preview" hidden><span class="status" data-thumbmsg></span></div>` : ""}
+    ${it.type === "prompt" ? `<div class="help" data-match></div>` : ""}`;
+
+  const set = (k, v) => { cur[sec][k] = String(v); refresh(); };
+  if (it.type === "size") {
+    const pre = el.querySelector(`#${id}-preset`), w = el.querySelector(`#${id}-w`), h = el.querySelector(`#${id}-h`);
+    pre.onchange = () => { if (pre.value !== "custom") { const [a, b] = pre.value.split("x"); cur[sec].width = a; cur[sec].height = b; refresh(); } };
+    w.oninput = () => set("width", w.value); h.oninput = () => set("height", h.value);
+  } else if (it.type === "encoder") {
+    const pre = el.querySelector(`#${id}-preset`), t = el.querySelector(`#${id}`);
+    pre.onchange = () => { if (pre.value !== "custom") set(it.k, pre.value); };
+    t.oninput = () => set(it.k, t.value);
+  } else if (!it.type) {
+    const r = el.querySelector(`#${id}-r`), n = el.querySelector(`#${id}`);
+    r.oninput = () => set(it.k, it.int ? r.value : fmt(r.value));
+    n.oninput = () => { if (n.value !== "" && !isNaN(+n.value)) set(it.k, it.int ? Math.round(+n.value) : n.value); };
+  } else {
+    const i = el.querySelector(`#${id}`); i.oninput = i.onchange = () => set(it.k, i.value);
+  }
+  el.querySelector("[data-dice]")?.addEventListener("click", () => set("seed", Math.floor(Math.random() * 100000)));
+  if (it.type === "image") {
+    const file = el.querySelector("[data-file]");
+    const upload = async f => {
+      if (!f) return;
+      if (!/^image\//.test(f.type) && !/\.(jpe?g|png|bmp|webp|tiff?|gif)$/i.test(f.name)) { toast("That is not an image file."); return; }
+      try {
+        toast(`Copying ${f.name}…`);
+        const r = await fetch("/api/upload_image", { method: "POST", headers: { "X-Token": TOKEN, "X-Filename": encodeURIComponent(f.name) }, body: f });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.error || r.statusText);
+        set(it.k, j.path); toast(`Start image set (copied to init_images\\). Not saved yet.`);
+      } catch (e) { toast(e.message); }
+    };
+    el.querySelector("[data-pick]").onclick = () => file.click();
+    el.querySelector("[data-clear]").onclick = () => set(it.k, "");
+    file.onchange = () => { upload(file.files[0]); file.value = ""; };
+    el.addEventListener("dragover", e => { if ([...e.dataTransfer.types].includes("Files")) { e.preventDefault(); el.classList.add("drop"); } });
+    el.addEventListener("dragleave", () => el.classList.remove("drop"));
+    el.addEventListener("drop", e => { e.preventDefault(); el.classList.remove("drop"); upload(e.dataTransfer.files[0]); });
+  }
+  el.querySelectorAll(".chip").forEach(c => c.onclick = () => set(it.k, c.dataset.v));
+  el.querySelector(".revert").onclick = () => { for (const k of keysOf(it)) cur[sec][k] = saved[sec][k] ?? ""; refresh(); };
+  return el;
+}
+
+function writeControls() {
+  for (const g of GROUPS) for (const it of g.items) {
+    const sec = sectionOf(g), id = `${sec}-${it.k}`, v = cur[sec][it.k] ?? "";
+    const act = document.activeElement;
+    const put = (sel, val) => { const e = document.getElementById(sel); if (e && e !== act) e.value = val; };
+    if (it.type === "size") {
+      const w = cur[sec].width ?? "", h = cur[sec].height ?? "";
+      const hit = SIZES.find(s => s[1] === w && s[2] === h);
+      put(`${id}-preset`, hit ? `${w}x${h}` : "custom"); put(`${id}-w`, w); put(`${id}-h`, h);
+    } else if (it.type === "encoder") {
+      const hit = ENCODERS.find(e => e[1] === v); put(`${id}-preset`, hit ? v : "custom"); put(id, v);
+    } else if (it.type === "select") {
+      const e = document.getElementById(id);
+      if (e && ![...e.options].some(o => o.value === v) && v) e.add(new Option(v));
+      put(id, v);
+    } else if (!it.type) { put(`${id}-r`, v); put(id, v); }
+    else put(id, v);
+    if (it.type === "image") showThumb(document.querySelector(`.ctl[data-sec="${sec}"][data-k="${it.k}"]`), v);
+    if (it.type === "prompt") showMatch(document.querySelector(`.ctl[data-sec="${sec}"][data-k="${it.k}"] [data-match]`), v, cur[sec].prompt_mode || "clip");
+    const ctl = document.querySelector(`.ctl[data-sec="${sec}"][data-k="${it.k}"]`);
+    ctl.classList.toggle("changed", keysOf(it).some(k => (cur[sec][k] ?? "") !== (saved[sec][k] ?? "")));
+  }
+  const sc = document.getElementById("render-scales");
+  sc.classList.toggle("bad-input", !parseScales(cur.render.scales));
+  document.querySelector('.ctl[data-sec="render"][data-k="layer_period"]').classList.toggle("dimmed", +cur.render.object_bias >= 1);
+  // prompt_mode = none: grey out the prompt group and lock everything in it except the mode switch
+  const off = (cur.render.prompt_mode || "clip") === "none";
+  const group = document.querySelector('.ctl[data-k="prompt_mode"]').closest("fieldset");
+  group.classList.toggle("off", off);
+  group.querySelectorAll(".ctl").forEach(ctl => {
+    const lock = off && ctl.dataset.k !== "prompt_mode";
+    ctl.classList.toggle("locked", lock);
+    ctl.querySelectorAll("input, textarea, select, button").forEach(e => e.disabled = lock);
+  });
+}
+
+function showThumb(ctl, path) {
+  const img = ctl.querySelector("[data-thumb]"), msg = ctl.querySelector("[data-thumbmsg]");
+  path = String(path || "").trim();
+  if (img.dataset.path === path) return;
+  img.dataset.path = path;
+  clearTimeout(showThumb.t);
+  if (!path) { img.hidden = true; img.removeAttribute("src"); msg.textContent = "No start image: the video grows from noise (seed)."; return; }
+  showThumb.t = setTimeout(() => {
+    img.onload = () => { img.hidden = false; msg.textContent = `${img.naturalWidth}×${img.naturalHeight}, cropped to fill the frame`; };
+    img.onerror = () => { img.hidden = true; msg.textContent = "File not found, or not an image (JPG, PNG, BMP, WEBP, TIFF)."; };
+    img.src = `/api/image?token=${TOKEN}&path=${encodeURIComponent(path)}`;
+  }, 300);
+}
+
+const promptOn = s => !!String(s.prompt || "").trim() && (s.prompt_mode || "clip") !== "none" && +(s.prompt_weight ?? 0.85) > 0;
+let matchInfo = { key: null, unmatched: [] };
+function showMatch(el, prompt, mode) {
+  const key = mode + "|" + String(prompt || "").trim();
+  if (el.dataset.key === key) return;
+  el.dataset.key = key;
+  clearTimeout(showMatch.t);
+  if (mode === "none") { el.textContent = "Prompt network is none: the prompt is ignored, plain dreaming."; matchInfo = { key, unmatched: [] }; return; }
+  if (!String(prompt || "").trim()) { el.textContent = "No prompt: plain dreaming."; matchInfo = { key, unmatched: [] }; return; }
+  if (mode !== "imagenet") { el.textContent = "CLIP reads the whole sentence."; matchInfo = { key, unmatched: [] }; return; }
+  el.textContent = "Matching ImageNet classes…";
+  showMatch.t = setTimeout(async () => {
+    try {
+      const r = await api(`/api/match?prompt=${encodeURIComponent(prompt)}`);
+      if (el.dataset.key !== key) return;
+      matchInfo = { key, unmatched: r.unmatched };
+      el.innerHTML = (r.matches.length ? "Uses: " + r.matches.map(([p, n]) => `<b>${esc(p)}</b> → ${esc(n.join(", "))}`).join(" · ") : "<b>No ImageNet class matches.</b>")
+        + (r.unmatched.length ? ` · <span style="color:var(--warn)">ignored: ${esc(r.unmatched.join(", "))}</span>` : "");
+      readout();
+    } catch (e) { el.textContent = e.message; }
+  }, 400);
+}
+
+function changes() {
+  const c = [];
+  for (const sec of ["render", "preview"]) for (const k of new Set([...Object.keys(cur[sec]), ...Object.keys(saved[sec])]))
+    if ((cur[sec][k] ?? "") !== (saved[sec][k] ?? "")) c.push([sec, k]);
+  return c;
+}
+
+function refresh() {
+  writeControls();
+  const n = changes().length;
+  $("#dirty").innerHTML = n ? `<b>${n} unsaved change${n > 1 ? "s" : ""}</b>` : "All changes saved";
+  $("#btn-save").disabled = !n; $("#btn-revert").disabled = !n;
+  readout();
+}
+
+// ----------------------------------------------------------------------------- readout (from the atlas measurements)
+const parseScales = s => { const a = String(s || "").split(",").map(x => x.trim()).filter(Boolean).map(Number); return a.length && a.every(x => x > 0 && x <= 2) ? a : null; };
+function interp(table, x, log = false) {
+  const f = v => log ? Math.log(v) : v;
+  if (x <= table[0][0]) return table[0][1];
+  for (let i = 1; i < table.length; i++) if (x <= table[i][0]) {
+    const [x0, y0] = table[i - 1], [x1, y1] = table[i], t = (f(x) - f(x0)) / (f(x1) - f(x0));
+    return log ? Math.exp(Math.log(y0) + t * (Math.log(y1) - Math.log(y0))) : y0 + t * (y1 - y0);
+  }
+  return table[table.length - 1][1];
+}
+const LIFE = [[0.05, 7.5], [0.1, 4.7], [0.2, 3.0], [0.35, 2.1], [0.5, 1.3], [0.8, 0.9], [1.2, 0.6]];
+const INTRO = [[0.67, 8], [1.0, 5.5], [1.6, 2], [2.6, 0.5]];
+const BUSY = [[0.5, 0.1], [1.0, 0.3], [1.6, 0.6], [2.6, 0.8], [4, 0.9]];
+
+function readout() {
+  const r = cur.render, num = k => +r[k];
+  const fps = num("fps") || 30, zoom = num("zoom_rate"), rot = num("rotate_rate"), hue = num("hue_rate");
+  const sc = parseScales(r.scales) || [0.12, 0.2, 0.3];
+  const bicubic = (r.resample || "bilinear") === "bicubic";
+  const sharpenEff = num("sharpen") * fps / 30;
+  let eff = num("strength") * Math.max(1, num("steps") || 1) * (0.2 / (num("target_std") || 0.2));
+  eff *= 1 + Math.min(0.6, 5 * sharpenEff);
+  if (bicubic) eff *= fps >= 45 ? 4 : 2.5;
+  const fine = Math.max(...sc) >= 0.5;
+
+  // lifetime
+  let life, lifeTxt;
+  if (zoom <= 0.001) lifeTxt = "no zoom: shapes stay and keep being repainted in place";
+  else {
+    life = zoom > 1.2 ? 0.7 / zoom : zoom < 0.05 ? null : interp(LIFE, zoom, true);
+    if (life && rot > 0.1) life *= 0.65;
+    lifeTxt = life ? `<b>≈ ${life.toFixed(1)} s</b> per shape` : "<b>8 s+</b> per shape (near-still)";
+  }
+  // intro
+  let introTxt;
+  if (eff < 0.6) introTxt = "<b>may never form</b> (too weak)";
+  else { const t = eff >= 2.6 ? 0.5 : interp(INTRO, eff); introTxt = `<b>≈ ${t.toFixed(t < 2 ? 1 : 0)} s</b> of balls and tubes first`; }
+  // busy-ness
+  let busy = interp(BUSY, eff);
+  if (Math.min(...sc) <= 0.08) busy -= 0.05;
+  if (fine && eff >= 2) busy += 0.1;
+  busy = Math.max(0.03, Math.min(0.97, busy));
+  const busyWord = fine && eff < 2 ? "soft, unformed" : busy < 0.25 ? "calm, big areas" : busy < 0.5 ? "balanced" : busy < 0.75 ? "busy" : "very busy";
+  // content
+  const ob = Math.min(1, num("object_bias"));
+  let kind = ob < 0.25 ? "eyes, spirals, scales" : ob < 0.65 ? "birds, feathers" : ob < 0.9 ? "glossy eggs, faces, objects" : "whole animals and objects";
+  if (fine && eff < 2) kind = "glossy tubes and capsules (fine scales stay soft)";
+  else if (num("target_mean") >= 0.35) kind += "; bright settings lean to objects";
+  const minS = Math.min(...sc);
+  const size = minS <= 0.08 ? "giant, frame-filling" : minS <= 0.15 ? "big" : minS <= 0.25 ? "medium to big" : "medium";
+  const crowd = zoom >= 0.35 ? "one subject at a time" : zoom < 0.15 ? "a crowd of many" : "a few at once";
+  const swirl = rot > 0 ? `up to ${Math.round(40 * rot * 180 / Math.PI)}° and back every ~21 s` : "none";
+  const cycle = hue > 0 ? `full cycle every ${(2 * Math.PI / hue).toFixed(0)} s` : "fixed palette";
+  const frames = Math.round((num("seconds") || 0) * fps);
+  const cost = (num("width") * num("height")) / (1920 * 1080) * (sc.reduce((a, s) => a + s * s, 0) * Math.max(1, num("steps") || 1) + 0.03) / (0.144 + 0.03) * frames / 720;
+
+  $("#facts").innerHTML = `
+    <dt>Shape lifetime</dt><dd>${lifeTxt}${zoom > 0 ? ` <span class="status">(zoom doubles every ${(Math.LN2 / zoom).toFixed(1)} s)</span>` : ""}</dd>
+    <dt>Intro</dt><dd>${introTxt}</dd>
+    <dt>Things</dt><dd>${esc(kind)}</dd>
+    <dt>Size</dt><dd>${size}, ${crowd}</dd>
+    <dt>Picture</dt><dd><div class="meter"><span>calm</span><div class="track"><div class="knob" style="left:${(busy * 100).toFixed(0)}%"></div></div><span>busy</span></div>${busyWord}</dd>
+    ${promptOn(r) ? `<dt>Prompt</dt><dd>${esc(r.prompt_mode || "clip")} at strength <b>${fmt(num("prompt_weight"))}</b></dd>` : ""}
+    <dt>Swirl</dt><dd>${swirl}</dd>
+    <dt>Colour</dt><dd>${cycle}</dd>
+    <dt>Render</dt><dd>${frames} frames · about <b>${cost < 1.5 ? cost.toFixed(1) : Math.round(cost)}×</b> the work of a 24 s base test</dd>`;
+
+  const W = [];
+  const add = (lvl, html) => W.push(`<div class="w ${lvl}">${html}</div>`);
+  if (bicubic && fps >= 45) add("bad", "<b>bicubic at 60 fps</b> melts into zig-zag streaks / grey mush. Use bilinear.");
+  else if (bicubic) add("warn", "<b>bicubic</b> sharpens every frame: expect a grainy, busy picture.");
+  if (rot > 0 && zoom > 0 && rot > zoom / 3) add("warn", `<b>Edge streaks likely:</b> swirl ${fmt(rot)} is more than a third of zoom ${fmt(zoom)}. Lower rotate_rate to ≤ ${fmt(zoom / 3, 3)}.`);
+  if (rot > 0 && zoom <= 0.001) add("warn", "<b>Edge streaks likely:</b> swirl without zoom pulls the edges in.");
+  if (fine && eff < 2) add("warn", "<b>Fine scales at this strength stay soft</b> and stuck at glossy tubes. Raise strength to ~2.5 or add sharpen 0.1, or use smaller scales.");
+  if (eff < 0.6) add("warn", "<b>Too weak:</b> at this strength / working contrast nothing recognisable may form.");
+  if (!parseScales(r.scales)) add("bad", "<b>scales</b> must be numbers between 0 and 2, separated by commas.");
+  if (+r.object_bias > 1) add("", "object_bias above 1 is treated as 1.");
+  if (sharpenEff > 0.3) add("warn", `<b>Sharpen ${fmt(num("sharpen"))}${fps >= 45 ? " at 60 fps" : ""}</b> builds up crawling grain.`);
+  if ((+r.steps || 1) > 1) add("", `steps ${r.steps}: same as more strength, ${r.steps}× slower.`);
+  if (Math.max(...sc) > 1) add("", "A scale above 1 runs the network on an enlarged frame: much slower renders.");
+  if (zoom > 1) add("", "Zoom above 1: frames get darker and softer, there's little time to add detail.");
+  if (num("noise") > 0.03) add("", "Noise above 0.03 slows the start and dulls colours.");
+  if (num("target_std") <= 0.13) add("", "Low working contrast: muted colours, fast takeover.");
+  if (num("target_std") >= 0.28) add("", "High working contrast: punchy, but slow to form and leans to objects.");
+  if (life && num("seconds") && num("seconds") < 8) add("warn", "Very short: most of it will be the intro.");
+  if (2 * num("fade_seconds") > num("seconds")) add("warn", "The fades are longer than the video.");
+  if (+r.width % 2 || +r.height % 2) add("", "Odd width/height are rounded down to even numbers.");
+  if (promptOn(r)) {
+    const w = num("prompt_weight");
+    add("", "Prompt on: frames take roughly 3–4× longer to render. Use Save &amp; preview to watch it form live.");
+    if (w < 0.6) add("warn", `<b>Prompt strength ${fmt(w)}</b>: the dream mostly wins; use 0.8–0.95 to see the prompt clearly.`);
+    if ((r.prompt_mode || "clip") === "imagenet" && matchInfo.unmatched.length)
+      add("warn", `<b>Not ImageNet classes, ignored:</b> ${esc(matchInfo.unmatched.join(", "))}. Switch to clip for free text.`);
+  }
+  if ((r.model || "vgg16") !== "vgg16") add("", `<b>${esc(r.model)}</b>: the estimates above were measured with vgg16, so treat them as rough. Run a preview.`);
+  if (!W.length) add("", "No known problems with these settings.");
+  $("#warnings").innerHTML = W.join("");
+}
+
+// ----------------------------------------------------------------------------- jobs, player, gallery
+let lastResult = null, polling = null, videos = [];
+
+function setPlayer(src, label) {
+  const p = $("#player"); p.src = src; p.play().catch(() => {}); $("#playing").textContent = label;
+}
+
+let liveTimer = null, liveKind = null;
+function setLive(kind) {   // while a job runs, show the frame dream.py is working on right now
+  const img = $("#live"), badge = $("#live-badge");
+  if (kind === liveKind) return;
+  liveKind = kind; clearInterval(liveTimer);
+  if (!kind) { img.hidden = true; badge.hidden = true; return; }
+  const tick = async () => {
+    try {
+      const m = await fetch(`/media/live/${kind}.json?t=${Date.now()}`).then(r => r.ok ? r.json() : null);
+      if (!m || liveKind !== kind) return;
+      const pre = new Image();
+      pre.onload = () => { if (liveKind === kind) { img.src = pre.src; img.hidden = false; badge.hidden = false; } };
+      pre.src = `/media/live/${kind}.jpg?t=${Date.now()}`;
+      $("#playing").textContent = `Live: frame ${m.frame} of ${m.frames} (${m.time.toFixed(1)} s into the video)`;
+    } catch (e) { }
+  };
+  tick(); liveTimer = setInterval(tick, 700);
+}
+
+function showJob(j) {
+  const run = j.running;
+  setLive(run ? j.kind : null);
+  $("#btn-stop").disabled = !run; $("#btn-preview").disabled = run; $("#btn-render").disabled = run;
+  const pct = j.frames ? (100 * j.frame / j.frames) : 0;
+  $("#bar").style.width = (run ? pct : j.code === 0 && j.kind ? 100 : pct) + "%";
+  let text = "Idle", time = "";
+  if (j.kind) {
+    const what = { preview: "Preview", render: "Render", attngan: "Text to image" }[j.kind] || j.kind;
+    const el = ((j.ended || Date.now() / 1000) - j.started);
+    if (run) {
+      text = `${what}: ${j.frames ? `frame ${j.frame} of ${j.frames}` : "starting…"}`;
+      const eta = j.frame > 30 ? el / j.frame * (j.frames - j.frame) : null;
+      time = `${mmss(el)} elapsed${eta ? ` · ~${mmss(eta)} left` : ""}`;
+    } else if (j.stopped) { text = `${what} stopped${j.kind === "render" ? " (Save & render resumes it)" : ""}`; }
+    else if (j.code === 0) { text = `${what} finished${j.result ? `: ${j.result}` : ""}`; time = mmss(el); }
+    else if (j.code !== null) { text = `${what} failed (code ${j.code}) — see the log`; }
+  }
+  $("#jobtext").textContent = text; $("#jobtime").textContent = time;
+  const log = $("#log"); const atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+  log.textContent = (j.log || []).join("\n"); if (atEnd) log.scrollTop = log.scrollHeight;
+  if (!run && j.code === 0 && j.result && j.result !== lastResult && j.ended) {
+    lastResult = j.result;
+    if (j.kind === "attngan") { agShow(); }
+    else if (j.kind === "preview") setPlayer(`/media/preview.mp4?t=${Date.now()}`, "Preview");
+    else { setPlayer(`/media/${j.result}?t=${Date.now()}`, j.result.replace("output/", "")); toast(`Saved ${j.result}`); loadState(); }
+  }
+  if (!run && j.code !== null && j.code !== 0 && !j.stopped && polling) {
+    $("#log").parentElement.open = true;
+    if (j.kind === "attngan") $("#ag-status").innerHTML = `<span style="color:var(--bad)">${esc((j.log || []).slice(-1)[0] || "Failed")}</span>`;
+  }
+  $("#ag-go").disabled = run;
+}
+const mmss = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+async function pollJob() {
+  try { const j = await api("/api/job"); showJob(j); if (!j.running) { clearInterval(polling); polling = null; loadState(); } } catch (e) { }
+}
+function startPolling() { if (!polling) polling = setInterval(pollJob, 1000); pollJob(); }
+
+async function save() {
+  if (!parseScales(cur.render.scales)) throw new Error("Fix scales first.");
+  const body = { render: {}, preview: {} };
+  for (const [sec, k] of changes()) body[sec][k] = cur[sec][k] ?? "";
+  const r = await api("/api/save", body);
+  saved = r.settings; cur = JSON.parse(JSON.stringify(saved)); refresh();
+}
+
+async function run(kind) {
+  try {
+    if (changes().length) await save();
+    await api("/api/run", { kind }); lastResult = null; startPolling();
+  } catch (e) { toast(e.message); }
+}
+
+async function loadState(first = false) {
+  const s = await api("/api/state");
+  if (first && s.version !== EDITOR_VERSION && !document.getElementById("outdated")) {
+    document.body.insertAdjacentHTML("afterbegin", `<div id="outdated" class="w bad" style="margin:0;border-radius:0">
+      <b>The editor was updated but is still running the old version.</b> Close the editor's black window
+      (wait for any running preview or render to finish first) and start 4_EDITOR.bat again.</div>`);
+  }
+  if (first) { saved = s.settings; cur = JSON.parse(JSON.stringify(saved)); refresh(); }
+  videos = s.videos; renderGallery();
+  const u = $("#unfinished");
+  u.hidden = !s.unfinished || s.job.running;
+  u.innerHTML = `An unfinished render is waiting in <code>work\\</code>. Save &amp; render continues it; the remaining part uses the current settings.
+    <button class="btn small danger" id="discard" type="button">Discard it</button>`;
+  u.querySelector("#discard")?.addEventListener("click", discard);
+  if (first) {
+    lastResult = s.job.result;
+    showJob(s.job); if (s.job.running) startPolling();
+    if (s.has_preview) setPlayer(`/media/preview.mp4?t=${Date.now()}`, "Preview");
+  }
+}
+
+let discardArmed = false;
+async function discard(e) {
+  if (!discardArmed) { discardArmed = true; e.target.textContent = "Click again to delete it"; setTimeout(() => { discardArmed = false; if (e.target.isConnected) e.target.textContent = "Discard it"; }, 4000); return; }
+  try { await api("/api/discard", {}); toast("Unfinished render discarded"); loadState(); } catch (err) { toast(err.message); }
+}
+
+function renderGallery() {
+  const g = $("#grid");
+  if (!videos.length) { g.innerHTML = `<p class="status">No videos yet. Render one from the editor.</p>`; return; }
+  const sig = videos.map(v => v.name).join("|");
+  if (g.dataset.sig === sig) return;
+  g.dataset.sig = sig;
+  g.innerHTML = videos.map((v, i) => {
+    const s = v.settings;
+    const kv = s ? `${promptOn(s) ? `prompt (${esc(s.prompt_mode || "clip")} ${esc(s.prompt_weight || 0.85)}): “${esc(s.prompt)}”<br>` : ""}${s.model || "vgg16"} · zoom ${s.zoom_rate} · strength ${s.strength} · scales ${s.scales}<br>object_bias ${s.object_bias ?? 0} · hue ${s.hue_rate} · ${s.resample || "bicubic (old)"} · seed ${s.seed}<br>${s.width}×${s.height} · ${s.fps} fps · ${s.seconds} s` : "No settings file";
+    return `<article class="card${lastResult && lastResult.endsWith(v.name) ? " new" : ""}">
+      <video preload="metadata" controls muted loop playsinline src="/media/output/${encodeURIComponent(v.name)}#t=3"></video>
+      <div class="body"><div class="title"><b>${v.num ?? "–"}</b><span class="status">${esc(v.name)} · ${(v.size / 1e6).toFixed(0)} MB</span></div>
+      <div class="kv">${kv}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">${s ? `<button class="btn small" data-load="${i}">Load settings</button>` : ""}
+      <button class="btn small" data-play="${i}">Show in editor</button></div></div></article>`;
+  }).join("");
+}
+
+$("#grid").addEventListener("click", e => {
+  const l = e.target.closest("[data-load]"), p = e.target.closest("[data-play]");
+  if (l) {
+    const v = videos[+l.dataset.load];
+    for (const [k, val] of Object.entries(v.settings)) cur.render[k] = val;
+    if (!v.settings.resample) cur.render.resample = "bicubic";   // made before the setting existed
+    if (!v.settings.model) cur.render.model = "vgg16";
+    refresh(); selectTab("editor"); toast(`Loaded settings of video ${v.num ?? v.name} (not saved yet)`);
+  }
+  if (p) { const v = videos[+p.dataset.play]; setPlayer(`/media/output/${encodeURIComponent(v.name)}`, v.name); selectTab("editor"); }
+});
+
+// ----------------------------------------------------------------------------- AttnGAN tab
+async function agGenerate() {
+  const prompt = $("#ag-prompt").value.trim();
+  if (!prompt) { toast("Type a sentence first."); return; }
+  try {
+    await api("/api/run", { kind: "attngan", prompt, dataset: $("#ag-dataset").value, seed: +$("#ag-seed").value || 1, count: +$("#ag-count").value || 4 });
+    $("#ag-status").textContent = "Generating…"; lastResult = null; startPolling();
+  } catch (e) { toast(e.message); }
+}
+async function agShow() {
+  const r = await fetch(`/media/attngan/result.json?t=${Date.now()}`).then(r => r.ok ? r.json() : null).catch(() => null);
+  if (!r) return;
+  $("#ag-status").innerHTML = `Drawn from: <b>${esc(r.used.join(" "))}</b>` + (r.ignored.length ? ` · <span style="color:var(--warn)">unknown to the ${esc(r.dataset)} model, ignored: ${esc(r.ignored.join(", "))}</span>` : "");
+  const t = Date.now();
+  $("#ag-results").innerHTML = r.images.map((im, i) => `<div class="ag-card">
+    <div class="ag-stages">
+      <figure><img src="/media/attngan/${im.stage1}?t=${t}" alt="stage 1, 64 pixels" style="width:64px"><figcaption>1 · 64 px sketch</figcaption></figure><span class="arrow">→</span>
+      <figure><img src="/media/attngan/${im.stage2}?t=${t}" alt="stage 2, 128 pixels" style="width:128px"><figcaption>2 · 128 px</figcaption></figure><span class="arrow">→</span>
+      <figure><img src="/media/attngan/${im.stage3}?t=${t}" alt="stage 3, 256 pixels"><figcaption>3 · 256 px final</figcaption></figure>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn small" data-use="${esc(im.stage3)}">Use as start image</button></div>
+    <details><summary class="status" style="cursor:pointer">Which word drew which part</summary><img src="/media/attngan/${im.attention}?t=${t}" alt="Attention of each word over the final image"></details>
+  </div>`).join("");
+}
+$("#ag-go").onclick = agGenerate;
+$("#ag-dice").onclick = () => { $("#ag-seed").value = Math.floor(Math.random() * 100000); };
+document.querySelectorAll("[data-ag]").forEach(b => b.onclick = () => { const [d, p] = b.dataset.ag.split("|"); $("#ag-dataset").value = d; $("#ag-prompt").value = p; });
+$("#ag-results").addEventListener("click", async e => {
+  const b = e.target.closest("[data-use]"); if (!b) return;
+  try {
+    const r = await api("/api/attngan_use", { file: b.dataset.use });
+    cur.render.init_image = r.path; refresh(); selectTab("editor");
+    toast("Set as the start image (copied to init_images\\). Not saved yet.");
+  } catch (err) { toast(err.message); }
+});
+
+function selectTab(name) {
+  for (const t of ["editor", "gallery", "attngan"]) {
+    $(`#tab-${t}`).setAttribute("aria-selected", t === name); $(`#view-${t}`).hidden = t !== name;
+  }
+}
+$("#tab-editor").onclick = () => selectTab("editor");
+$("#tab-gallery").onclick = () => selectTab("gallery");
+$("#tab-attngan").onclick = () => { selectTab("attngan"); if (!$("#ag-results").innerHTML) agShow(); };
+$("#btn-save").onclick = () => save().then(() => toast("Saved settings.ini")).catch(e => toast(e.message));
+$("#btn-revert").onclick = () => { cur = JSON.parse(JSON.stringify(saved)); refresh(); };
+$("#btn-preview").onclick = () => run("preview");
+$("#btn-render").onclick = () => run("render");
+$("#btn-stop").onclick = () => api("/api/stop", {}).then(pollJob).catch(e => toast(e.message));
+function toggleBig(on) {
+  const s = document.querySelector(".viewer .screen"), b = $("#btn-enlarge");
+  on = on ?? !s.classList.contains("big");
+  s.classList.toggle("big", on);
+  b.textContent = on ? "✕ Close" : "⤢ Enlarge";
+  b.setAttribute("aria-label", on ? "Close the enlarged viewer" : "Enlarge the viewer");
+}
+$("#btn-enlarge").onclick = () => toggleBig();
+document.addEventListener("keydown", e => { if (e.key === "Escape" && document.querySelector(".screen.big")) toggleBig(false); });
+$("#show-preview").onclick = () => setPlayer(`/media/preview.mp4?t=${Date.now()}`, "Preview");
+$("#show-latest").onclick = () => { const v = videos.find(v => v.num != null) || videos[0]; if (v) setPlayer(`/media/output/${encodeURIComponent(v.name)}`, v.name); };
+$("#player").addEventListener("error", () => { if ($("#player").getAttribute("src")) $("#playing").textContent = "Nothing to play yet."; });
+const rsel = $("#recipe");
+RECIPES.forEach(([name], i) => rsel.add(new Option(name, i)));
+rsel.onchange = () => {
+  if (rsel.value === "") return;
+  for (const [k, v] of Object.entries(RECIPES[+rsel.value][1])) cur.render[k] = String(v);
+  toast(`Applied "${RECIPES[+rsel.value][0]}" (not saved yet)`); rsel.value = ""; refresh();
+};
+document.addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); if (changes().length) $("#btn-save").click(); } });
+window.addEventListener("beforeunload", e => { if (changes().length) { e.preventDefault(); e.returnValue = ""; } });
+
+buildControls();
+loadState(true).catch(e => { document.body.insertAdjacentHTML("afterbegin", `<div class="w bad" style="margin:12px">Could not reach the editor server: ${esc(e.message)}. Start it with 4_EDITOR.bat.</div>`); });
+</script>
+</body>
+</html>

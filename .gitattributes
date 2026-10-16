@@ -1,0 +1,10 @@
+# Normalise text files; keep Windows line endings where Windows tools need them
+* text=auto
+*.bat text eol=crlf
+*.ini text eol=crlf
+*.py text eol=lf
+*.html text eol=lf
+*.txt text eol=crlf
+*.mp4 binary
+*.png binary
+*.jpg binary
