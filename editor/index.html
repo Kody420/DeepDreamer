@@ -631,7 +631,7 @@ const BUSY = [[0.5, 0.1], [1.0, 0.3], [1.6, 0.6], [2.6, 0.8], [4, 0.9]];
 function readout() {
   const r = cur.render, num = k => +r[k];
   const fps = num("fps") || 30, hue = num("hue_rate"), ws = warp ? warp.summary() : { names: [], zoom: 0 };
-  const zoom = Math.max(0, ws.zoom);   // the stack's Zoom modules set how long shapes last
+  const zoom = Math.max(0, ws.stretch ?? ws.zoom);   // how fast the motion stack stretches shapes, as a zoom speed: sets how long they last
   const sc = parseScales(r.scales) || [0.12, 0.2, 0.3];
   const bicubic = (r.resample || "bilinear") === "bicubic";
   const sharpenEff = num("sharpen") * fps / 30;
@@ -642,10 +642,13 @@ function readout() {
 
   // lifetime
   let life, lifeTxt;
-  if (zoom <= 0.001) lifeTxt = "no zoom: shapes stay and keep being repainted in place";
+  if (zoom <= 0.001) lifeTxt = ws.motion > 0.004 ? "the motion carries shapes without stretching them: they stay and keep being repainted"
+    : ws.noClip ? "unknown until the clip's motion is extracted (Motion tab)" : "no motion: shapes stay and keep being repainted in place";
   else {
     life = zoom > 1.2 ? 0.7 / zoom : zoom < 0.05 ? null : interp(LIFE, zoom, true);
-    lifeTxt = life ? `<b>≈ ${life.toFixed(1)} s</b> per shape` : "<b>8 s+</b> per shape (near-still)";
+    lifeTxt = (life ? `<b>≈ ${life.toFixed(1)} s</b> per shape` : "<b>8 s+</b> per shape (near-still)")
+      + ` <span class="status">(${ws.onlyZoom || ws.stretch == null ? "zoom doubles" : "the motion stretches them ×2"} every ${(Math.LN2 / zoom).toFixed(1)} s)</span>`;
+    if (ws.noClip) lifeTxt += ` <span class="status">Without the clip's motion: extract it on the Motion tab.</span>`;
   }
   // intro
   let introTxt;
@@ -670,7 +673,7 @@ function readout() {
   const cost = (num("width") * num("height")) / (1920 * 1080) * (sc.reduce((a, s) => a + s * s, 0) * Math.max(1, num("steps") || 1) + 0.03) / (0.144 + 0.03) * frames / 720;
 
   $("#facts").innerHTML = `
-    <dt>Shape lifetime</dt><dd>${lifeTxt}${zoom > 0 ? ` <span class="status">(zoom doubles every ${(Math.LN2 / zoom).toFixed(1)} s)</span>` : ""}</dd>
+    <dt>Shape lifetime</dt><dd>${lifeTxt}</dd>
     <dt>Intro</dt><dd>${introTxt}</dd>
     <dt>Things</dt><dd>${esc(kind)}</dd>
     <dt>Size</dt><dd>${size}, ${crowd}</dd>
@@ -691,7 +694,7 @@ function readout() {
   if (sharpenEff > 0.3) add("warn", `<b>Sharpen ${fmt(num("sharpen"))}${fps >= 45 ? " at 60 fps" : ""}</b> builds up crawling grain.`);
   if ((+r.steps || 1) > 1) add("", `steps ${r.steps}: same as more strength, ${r.steps}× slower.`);
   if (Math.max(...sc) > 1) add("", "A scale above 1 runs the network on an enlarged frame: much slower renders.");
-  if (zoom > 1) add("", "Zoom above 1: frames get darker and softer, there's little time to add detail.");
+  if (ws.zoom > 1) add("", "Zoom above 1:frames get darker and softer, there's little time to add detail.");
   if (num("noise") > 0.03) add("", "Noise above 0.03 slows the start and dulls colours.");
   if (num("target_std") <= 0.13) add("", "Low working contrast: muted colours, fast takeover.");
   if (num("target_std") >= 0.28) add("", "High working contrast: punchy, but slow to form and leans to objects.");
@@ -942,7 +945,7 @@ $("#btn-preview").onclick = () => run("preview");
 $("#btn-render").onclick = () => run("render");
 $("#btn-stop").onclick = () => api("/api/stop", {}).then(pollJob).catch(e => toast(e.message));
 function toggleBig(on) {
-  const s = document.querySelector(".viewer .screen"), b = $("#btn-enlarge");
+  const b = $("#btn-enlarge"), s = b.closest(".screen");   // not the first .viewer .screen: the Motion preview has one too
   on = on ?? !s.classList.contains("big");
   s.classList.toggle("big", on);
   b.textContent = on ? "✕ Close" : "⤢ Enlarge";
@@ -967,7 +970,7 @@ window.addEventListener("beforeunload", e => { if (changes().length) { e.prevent
 buildControls();
 warp = WarpLab.mount({
   root: $("#warp"), side: $("#warp-side"), extra: document.querySelector('fieldset.group[data-tab="motion"]'),
-  get: () => cur.warp, saved: () => saved.warp, set: d => { cur.warp = d; refresh(); }, render: () => cur.render, toast,
+  get: () => cur.warp, saved: () => saved.warp, set: d => { cur.warp = d; refresh(); }, refresh: () => refresh(), render: () => cur.render, toast,
   player: $("#player"), live: $("#live"), imageUrl: p => `/api/image?token=${TOKEN}&path=${encodeURIComponent(p)}`,
   token: TOKEN, clipUrl: p => `/api/clip?token=${TOKEN}&path=${encodeURIComponent(p)}`,
   uploadClip: async f => {   // copied into the clips folder, like start images into init_images

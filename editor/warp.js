@@ -3,7 +3,7 @@
 // do to a picture. The preview runs only the warp, in WebGL, on a stand-in picture; dream.py (warp_stack) applies
 // the same maths in the real render. Keep MODS in step with WARP_PARAMS there.
 //
-// index.html mounts it with   WarpLab.mount({ root, side, extra, get, set, render, toast, player, live, imageUrl })
+// index.html mounts it with   WarpLab.mount({ root, side, extra, get, set, refresh, render, toast, player, live, imageUrl })
 // (root: the stack, in the settings window; side: the preview, in the monitor on the right)
 // and calls sync() whenever cur.warp may have changed from outside (load, revert, gallery), show() on tab switches.
 window.WarpLab = (() => {
@@ -433,16 +433,17 @@ function readStats(list, t) {
   gl.readPixels(0, 0, 64, 36, gl.RGBA, gl.FLOAT, statBuf);
   const map = coordMap(list, t, 30), wp = progs.wstats; gl.useProgram(wp.p); gl.uniform1f(wp.u("u_aspect"), A); bindTex(1, map); drawTo(statsT);
   gl.readPixels(0, 0, 64, 36, gl.RGBA, gl.FLOAT, wBuf); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-  const n = 64 * 36, grow = [], shear = [], disp = []; let tears = 0, outside = 0, dsum = 0;
+  const n = 64 * 36, grow = [], shear = [], stretch = [], disp = []; let tears = 0, outside = 0, dsum = 0;
   for (let i = 0; i < n; i++) {
     const det = wBuf[i * 4], an = wBuf[i * 4 + 1], dp = statBuf[i * 4 + 2];
     disp.push(dp); dsum += dp;
     if (wBuf[i * 4 + 3] > .5) { outside++; continue; }   // edge fill: judged by the edge mode, not as motion
     if (wBuf[i * 4 + 2] > .5 || !isFinite(det) || !isFinite(an)) { tears++; continue; }
-    grow.push(-Math.log(Math.abs(det))); shear.push(Math.log(an));
+    const g = -Math.log(Math.abs(det)), s = Math.log(an);
+    grow.push(g); shear.push(s); stretch.push((g + s) / 2);   // log of the fastest stretch in a second: a Zoom at rate r gives r
   }
   const pct = (a, q) => { if (!a.length) return 0; a.sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.floor(q * a.length))]; };
-  return { grow: pct(grow, .95), shrink: -pct(grow, .05), shear: pct(shear, .95), tears: tears / n, outside: outside / n,
+  return { grow: pct(grow, .95), shrink: -pct(grow, .05), shear: pct(shear, .95), stretch: pct(stretch, .5), tears: tears / n, outside: outside / n,
     motion: dsum / n * 30 / 2, disp95: pct(disp, .95) };
 }
 
@@ -605,7 +606,7 @@ async function loadField(m) {
       const buf = await r.arrayBuffer(), hl = new DataView(buf).getUint32(0, true);
       const head = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hl)));
       fields[key] = gl ? fieldTexture(head, new Uint16Array(buf.slice(4 + hl))) : { state: "ready", ...head };
-      renderVideoGlyph(); resettle(0);
+      renderVideoGlyph(); resettle(0); host.refresh?.();   // the editor's shape lifetime can count the clip now
     }
   } catch (e) { fields[key] = { state: "error", msg: e instanceof TypeError ? "The editor isn't answering. Check that 4_EDITOR.bat is open, then reload the page." : e.message }; }
   videoStatus();
@@ -1217,10 +1218,26 @@ function oldValue(k) {
   const s = S.stack.find(m => m.key === "spin");
   return s && s.mod.rate.shape === "sine" && !s.vals.rate ? +(s.mod.rate.depth / 6).toFixed(4) : 0;
 }
-// for the editor's "What to expect": the stack's names and the zoom speed that sets how long shapes last
+// for the editor's "What to expect": the stack's names, its Zoom speed, and how fast the whole stack stretches
+// shapes (as a zoom speed), which sets how long they last. Flow, Swirl, Melt, Video motion and waved settings count too.
+// Measuring takes up to ~0.3 s, so it runs once edits pause and then refreshes the editor; until then the last value stands.
+let stretchKey = "", stretchVal = null, stretchT = 0;
 function summary() {
-  const on = S.stack.filter(m => m.on);
-  return { names: on.map(m => BY[m.key].name), zoom: on.filter(m => m.key === "zoom").reduce((a, m) => a + m.vals.rate, 0) };
+  const on = S.stack.filter(m => m.on), list = on.filter(m => m.key !== "kaleido");
+  const out = { names: on.map(m => BY[m.key].name), zoom: on.filter(m => m.key === "zoom").reduce((a, m) => a + m.vals.rate, 0),
+    onlyZoom: on.length > 0 && on.every(m => m.key === "zoom"), noClip: list.some(m => m.key === "video" && !readyField(m)), stretch: null, motion: null };
+  if (!gl || !floatOK) return out;
+  const key = JSON.stringify([list.map(m => [m.key, m.vals, m.mod, m.key === "video" ? [fieldKey(m), !!readyField(m)] : 0]), S.T, A, S.edge]);
+  if (key !== stretchKey) {
+    clearTimeout(stretchT);
+    stretchT = setTimeout(() => {   // measured at a few times over the video: once when nothing changes with time
+      const N = list.some(m => m.key === "video" || BY[m.key].params.some(p => m.mod[p.k].shape !== "none")) ? 8 : 1;
+      let s = 0, mo = 0;
+      for (let i = 0; i < N; i++) { const st = readStats(list, Math.min(S.T, 1 + (S.T - 1) * (i + .5) / N)); s += st.stretch; mo += st.motion; }
+      stretchKey = key; stretchVal = { stretch: s / N, motion: mo / N }; host.refresh?.();
+    }, 250);
+  }
+  return { ...out, ...stretchVal };
 }
 function mount(opts) {
   host = opts; root = opts.root; side = opts.side;
