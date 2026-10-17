@@ -59,7 +59,14 @@ def load_cfg(preview):
     c["prompt_cuts"] = int(base.get("prompt_cuts", 8))                  # random crops the prompt network looks at
     c["fade_seconds"] = float(base.get("fade_seconds", 1.5))
     c["encoder_args"] = base.get("encoder_args", "-c:v libx264 -preset fast -crf 14 -pix_fmt yuv420p").split()
+    # variety: what the network is asked to see changes over time (all 0 = the plain dream)
+    c["jitter"] = min(8.0, max(0.0, float(base.get("jitter", 0))))                 # random shift, in network pixels
+    c["channel_drift"] = min(1.0, max(0.0, float(base.get("channel_drift", 0))))   # how far the taste wanders
+    c["channel_period"] = max(0.5, float(base.get("channel_period", 8)))           # seconds per change of taste
+    c["novelty"] = min(1.0, max(0.0, float(base.get("novelty", 0))))               # fade what has dominated lately
+    c["layer_walk"] = min(1.0, max(0.0, float(base.get("layer_walk", 0))))         # 0 = layer cycle, 1 = random walk
     c["warp"] = parse_warp(cp["warp"] if cp.has_section("warp") else warp_from_old(c))   # the motion stack
+    c["feed"] = parse_feed(cp["feed"] if cp.has_section("feed") else feed_from_old(c))   # the feed stack
     return c
 
 
@@ -81,6 +88,8 @@ class DreamNet(torch.nn.Module):
         self.stages = torch.nn.ModuleList(stages)
         self.taps = taps            # stage index for each of the five layer weights
         self.pre = pre              # optional input conversion the network expects
+        self.cw = None              # optional weight per channel for each tap (taste drift, boredom)
+        self.energy = {}            # tap -> energy of each channel, from the last forward pass
 
     def forward(self, x, lw):
         if self.pre is not None:
@@ -92,10 +101,27 @@ class DreamNet(torch.nn.Module):
             if i in self.taps:
                 k = self.taps.index(i)
                 if lw[k] > 1e-3:
-                    loss = loss + float(lw[k]) * x.float().pow(2).mean()
+                    if self.cw is None:
+                        loss = loss + float(lw[k]) * x.float().pow(2).mean()
+                    else:           # a weighted mean over channels; equal weights give exactly the line above
+                        e = x.float().pow(2).mean((0, 2, 3))
+                        self.energy[k] = e.detach()
+                        loss = loss + float(lw[k]) * (e * self.cw[k]).sum() / self.cw[k].sum()
             if i >= need:          # deeper stages don't contribute
                 break
         return loss
+
+    def channels(self, dev):
+        """Number of channels at each tap, from one small dry run."""
+        x, out = torch.zeros(1, 3, 64, 64, device=dev), []
+        if self.pre is not None:
+            x = self.pre(x)
+        with torch.no_grad():
+            for i, stage in enumerate(self.stages):
+                x = stage(x)
+                if i in self.taps:
+                    out.append(x.shape[1])
+        return out
 
 
 def build_model(dev, name="vgg16"):
@@ -139,12 +165,83 @@ def layer_weights(t, period, object_bias=0.0):
     return (1 - object_bias) * w + object_bias * OBJECT_W
 
 
-def grad_at_scale(model, x, scale, lw, dev, amp, trace=None):
+def walk_weights(z, object_bias):
+    """Layer weights from a random walk z (5 values): object_bias tilts the walk toward the deep layers
+    instead of fixing them, so "mostly objects" still varies between fur, eyes and whole animals."""
+    a = 1.6 * z + 2.5 * object_bias * np.log(OBJECT_W + 0.05)
+    w = np.exp(a - a.max())
+    return w / w.sum()
+
+
+class Variety:
+    """Changes what the network is asked to see as the video goes on: drifting channel weights (taste drift),
+    fading whatever has dominated lately (boredom), a random walk over the layers, and jitter.
+    Everything at 0 leaves the dream exactly as before. Its state is saved with the render's chunks."""
+
+    def __init__(self, c, model, dev):
+        self.c, self.model, fps = c, model, c["fps"]
+        self.gen = torch.Generator(device="cpu").manual_seed(c["seed"] * 31 + 5)
+        self.channels = c["channel_drift"] > 0 or c["novelty"] > 0
+        self.rho_c = math.exp(-1.0 / (c["channel_period"] * fps))
+        self.rho_l = math.exp(-1.0 / (max(c["layer_period"], 0.5) * fps))
+        self.z = [torch.randn(n, generator=self.gen).to(dev) for n in model.channels(dev)] if self.channels else []
+        self.ema = [torch.ones_like(z) for z in self.z]
+        self.lz = torch.randn(5, generator=self.gen).numpy()
+
+    def layers(self, t):
+        c = self.c
+        lw = layer_weights(t, c["layer_period"], c["object_bias"])
+        if c["layer_walk"] > 0:
+            lw = (1 - c["layer_walk"]) * lw + c["layer_walk"] * walk_weights(self.lz, c["object_bias"])
+        return lw
+
+    def shift(self, scale):
+        """Jitter offset for one gradient: up to `jitter` network pixels each way."""
+        j = int(round(self.c["jitter"]))
+        if j <= 0:
+            return (0, 0)
+        a, b = torch.randint(-j, j + 1, (2,), generator=self.gen).tolist()
+        return (a, b)
+
+    def before(self):
+        """Set this frame's channel weights on the network."""
+        if not self.channels:
+            return
+        beta, nov = 3.0 * self.c["channel_drift"], self.c["novelty"]
+        self.model.cw = [torch.exp(beta * z - 2.0 * nov * (e - 1)) for z, e in zip(self.z, self.ema)]
+
+    def after(self):
+        """Move the walks on by one frame; boredom remembers which channels carried the energy."""
+        r = math.sqrt(1 - self.rho_l ** 2)
+        self.lz = self.rho_l * self.lz + r * torch.randn(5, generator=self.gen).numpy()
+        if not self.channels:
+            return
+        r = math.sqrt(1 - self.rho_c ** 2)
+        for k, z in enumerate(self.z):
+            z.mul_(self.rho_c).add_(torch.randn(z.shape, generator=self.gen).to(z.device), alpha=r)
+            e = self.model.energy.get(k)
+            if e is not None:   # this channel's share of the energy, 1 = average; remembered for ~2 s
+                self.ema[k].mul_(0.98).add_(0.02 * e / (e.mean() + 1e-8))
+        self.model.energy = {}
+
+    def state_dict(self):
+        return dict(gen=self.gen.get_state(), z=[z.cpu() for z in self.z], ema=[e.cpu() for e in self.ema], lz=self.lz)
+
+    def load_state_dict(self, d):
+        self.gen.set_state(d["gen"]); self.lz = d["lz"]
+        if self.channels and len(d["z"]) == len(self.z):
+            dev = self.z[0].device
+            self.z = [z.to(dev) for z in d["z"]]; self.ema = [e.to(dev) for e in d["ema"]]
+
+
+def grad_at_scale(model, x, scale, lw, dev, amp, trace=None, shift=(0, 0)):
     xs = x
     if scale != 1.0:
         xs = F.interpolate(x, scale_factor=scale, mode="bilinear", antialias=True, align_corners=False)
     xs = xs.detach().requires_grad_(True)
     inp = (xs - MEAN.to(dev)) / STD.to(dev)
+    if shift != (0, 0):   # jitter: the network sees the picture shifted; the gradient comes back unshifted
+        inp = torch.roll(inp, shift, (2, 3))
     if dev.type == "cuda":
         inp = inp.contiguous(memory_format=torch.channels_last)
     with torch.autocast(device_type=dev.type, dtype=torch.float16, enabled=amp):
@@ -235,34 +332,84 @@ def parse_warp(sec):
             bad(f"unknown module '{name}' in stack (known: {', '.join(WARP_PARAMS)})")
         if sec.get(f"{name}.on", "yes").strip().lower() in ("no", "off", "false", "0"):
             continue
-        params = []
-        for k, lo, hi, d in WARP_PARAMS[kind]:
-            raw = sec.get(f"{name}.{k}", str(d)).strip()
-            m = re.fullmatch(r"(-?[\d.]+(?:e-?\d+)?)\s*(?:~\s*([a-z]+)\s*\(([^)]*)\))?", raw)
-            if not m:
-                bad(f"{name}.{k} = {raw} is not a number (optionally followed by ~ sine(period=..., depth=...))")
-            curve = None
-            if m.group(2):
-                if m.group(2) not in WARP_CURVES:
-                    bad(f"{name}.{k}: curve must be one of {', '.join(WARP_CURVES)}, not '{m.group(2)}'")
-                curve = dict(shape=m.group(2), period=8.0, depth=0.5, phase=0.0)
-                for part in filter(None, (s.strip() for s in m.group(3).split(","))):
-                    a, _, b = part.partition("=")
-                    if a.strip() not in ("period", "depth", "phase"):
-                        bad(f"{name}.{k}: unknown curve setting '{a.strip()}'")
-                    curve[a.strip()] = float(b)
-                curve["period"] = max(curve["period"], 0.05)
-            params.append((float(m.group(1)), lo, hi, curve))
-        pivot = [float(v) for v in sec.get(f"{name}.pivot", "0, 0").split(",")]
-        where = sec.get(f"{name}.where", "").split()   # e.g. "near 0.6 soft 0.4" / "away 0.5 soft 0.3"
-        mode = {"near": 1, "away": 2}.get(where[0], 0) if where else 0
-        radius = float(where[1]) if len(where) > 1 else .6
-        soft = float(where[3]) if len(where) > 3 else .4
-        m = dict(kind=kind, params=params, pivot=pivot[:2] + [0.0] * (2 - len(pivot)), where=(mode, radius, soft))
+        params = [parse_value(sec.get(f"{name}.{k}", str(d)), lo, hi, f"{name}.{k}", bad) for k, lo, hi, d in WARP_PARAMS[kind]]
+        pivot, where = parse_place(sec, name, ("near", "away"), bad)
+        m = dict(kind=kind, params=params, pivot=pivot, where=where)
         if kind == "video":
             m["video"] = load_video_motion(sec, name, bad)
         stack.append(m)
     return dict(stack=stack, edge=edge, prism=float(sec.get("prism", "0")))
+
+
+def parse_value(raw, lo, hi, label, bad):
+    """A [warp] or [feed] value: a number, optionally followed by a motion curve -> (value, lo, hi, curve)."""
+    raw = raw.strip()
+    m = re.fullmatch(r"(-?[\d.]+(?:e-?\d+)?)\s*(?:~\s*([a-z]+)\s*\(([^)]*)\))?", raw)
+    if not m:
+        bad(f"{label} = {raw} is not a number (optionally followed by ~ sine(period=..., depth=...))")
+    curve = None
+    if m.group(2):
+        if m.group(2) not in WARP_CURVES:
+            bad(f"{label}: curve must be one of {', '.join(WARP_CURVES)}, not '{m.group(2)}'")
+        curve = dict(shape=m.group(2), period=8.0, depth=0.5, phase=0.0)
+        for part in filter(None, (s.strip() for s in m.group(3).split(","))):
+            a, _, b = part.partition("=")
+            if a.strip() not in ("period", "depth", "phase"):
+                bad(f"{label}: unknown curve setting '{a.strip()}'")
+            curve[a.strip()] = float(b)
+        curve["period"] = max(curve["period"], 0.05)
+    return (float(m.group(1)), lo, hi, curve)
+
+
+def parse_place(sec, name, modes, bad):
+    """A module's pivot and where: "near 0.6 soft 0.4" limits it to a disc around the pivot, "away" to everything
+    outside it; the feed also has "idle", the parts of the frame the dream has stopped changing."""
+    pivot = [float(v) for v in sec.get(f"{name}.pivot", "0, 0").split(",")]
+    where = sec.get(f"{name}.where", "").split()
+    if where and where[0] not in modes:
+        bad(f"{name}.where must start with {' or '.join(modes)}, not '{where[0]}'")
+    mode = modes.index(where[0]) + 1 if where else 0
+    radius = float(where[1]) if len(where) > 1 else .6
+    soft = float(where[3]) if len(where) > 3 else .4
+    return pivot[:2] + [0.0] * (2 - len(pivot)), (mode, radius, soft)
+
+
+# ----------------------------------------------------------------------------- feed stack
+# The [feed] section: modules that add new material for the dream every frame (feed.py, the editor's Feed tab).
+def feed_from_old(c):
+    """Settings files from before the feed stack have no [feed]: their noise becomes a Grain module with one
+    value per pixel, drawn fresh every frame, as the old noise was. editor/server.py does the same."""
+    if c["noise"] <= 0:
+        return {"stack": ""}
+    return {"stack": "grain", "grain.amount": str(c["noise"]), "grain.life": "0", "grain.grid": "pixel"}
+
+
+def parse_feed(sec):
+    """[feed] section -> dict(stack). Values take motion curves like [warp]; text keys are checked against feed.py."""
+    import feed
+    bad = lambda msg: sys.exit(f"settings.ini [feed]: {msg}")
+    stack = []
+    for name in [n.strip().lower() for n in sec.get("stack", "").split(",") if n.strip()]:
+        kind = name.rstrip("0123456789")
+        if kind not in feed.FEED_PARAMS:
+            bad(f"unknown module '{name}' in stack (known: {', '.join(feed.FEED_PARAMS)})")
+        if sec.get(f"{name}.on", "yes").strip().lower() in ("no", "off", "false", "0"):
+            continue
+        params = [parse_value(sec.get(f"{name}.{k}", str(d)), lo, hi, f"{name}.{k}", bad) for k, lo, hi, d in feed.FEED_PARAMS[kind]]
+        text = {}
+        for k, allowed in feed.FEED_TEXT.get(kind, {}).items():
+            v = sec.get(f"{name}.{k}", allowed[0]).strip().strip('"')
+            if len(allowed) > 1 and v.lower() not in allowed:
+                bad(f"{name}.{k} must be one of {', '.join(allowed)}, not '{v}'")
+            text[k] = v if len(allowed) == 1 else v.lower()
+        pivot, where = parse_place(sec, name, ("near", "away", "idle"), bad)
+        m = dict(kind=kind, name=name, params=params, pivot=pivot, where=where, text=text)
+        if kind == "pictures":
+            m["files"] = feed.picture_files(text["folder"], HERE)
+            if not m["files"]:
+                bad(f"{name}.folder has no pictures: {text['folder']}")
+        stack.append(m)
+    return dict(stack=stack)
 
 
 def load_video_motion(sec, name, bad):
@@ -385,8 +532,28 @@ def _sample(img, x, y, edge, mode):
 
 def warp_stack(img, t, warp_cfg, dt, total, mode="bilinear"):
     """One frame of the [warp] stack: move the sampling grid through every module, then resample once."""
+    return resample(img, warp_coords(img, t, warp_cfg, dt, total), warp_cfg, dt, mode)
+
+
+def resample(img, xy, warp_cfg, dt, mode="bilinear", prism=True):
+    """Read img through the coordinates from warp_coords (None = no motion). prism=False skips the colour split,
+    for things carried along with the picture (world-locked feed)."""
+    if xy is None:
+        return img
+    x, y = xy
+    edge = warp_cfg["edge"]
+    p = warp_cfg["prism"] * 30 * dt if prism else 0
+    if p <= 0:
+        return _sample(img, x, y, edge, mode)
+    r_ = _sample(img[:, 0:1], x * (1 + p), y * (1 + p), edge, mode)   # red and blue zoom slightly apart
+    b_ = _sample(img[:, 2:3], x * (1 - p), y * (1 - p), edge, mode)
+    return torch.cat([r_, _sample(img[:, 1:2], x, y, edge, mode), b_], 1)
+
+
+def warp_coords(img, t, warp_cfg, dt, total):
+    """Where each pixel of the new frame reads from in the old one (y up), after every module of the stack."""
     if not warp_cfg["stack"] and warp_cfg["prism"] <= 0:
-        return img   # an empty stack: no motion, so no resampling (and no blur) either
+        return None   # an empty stack: no motion, so no resampling (and no blur) either
     h, w = img.shape[-2:]
     a = w / h
     dev = img.device
@@ -489,12 +656,7 @@ def warp_stack(img, t, warp_cfg, dt, total, mode="bilinear"):
             wt = inside if wmode == 1 else 1 - inside
             qx, qy = torch.lerp(x, qx, wt), torch.lerp(y, qy, wt)
         x, y = qx, qy
-    prism = warp_cfg["prism"] * k30
-    if prism <= 0:
-        return _sample(img, x, y, edge, mode)
-    r_ = _sample(img[:, 0:1], x * (1 + prism), y * (1 + prism), edge, mode)   # red and blue zoom slightly apart
-    b_ = _sample(img[:, 2:3], x * (1 - prism), y * (1 - prism), edge, mode)
-    return torch.cat([r_, _sample(img[:, 1:2], x, y, edge, mode), b_], 1)
+    return x, y
 
 
 def hue_matrix(angle, dev):
@@ -540,27 +702,51 @@ class Dreamer:
         self.model = build_model(dev, c["model"])
         self.lr = c["strength"] / 255.0 * (30.0 / fps)       # step in 0..1 units, scaled for fps
         self.hue = hue_matrix(c["hue_rate"] / fps, dev)
-        self.noise = c["noise"] * math.sqrt(30.0 / fps)
+        self.variety = Variety(c, self.model, dev)
+        self.feed = None
+        if c["feed"]["stack"]:
+            import feed
+            self.feed = feed.Feed(c["feed"], c, dev, feed.Ops(sample=_sample, vn3=_vn3, make_seed=make_seed,
+                                                              curve=curve_value, edge=c["warp"]["edge"]))
+        self.activity = None     # where the dream changed the picture last frame (for feed modules set to "idle")
         self.guide = None
         if c["prompt"] and c["prompt_weight"] > 0 and c["prompt_mode"] != "none":
             from prompts import PromptGuide
             self.guide = PromptGuide(c, dev, c["model"])
+
+    def state_dict(self):
+        """Everything besides the picture that the next frame depends on, so a resumed render carries on exactly."""
+        return dict(variety=self.variety.state_dict(), feed=self.feed.state_dict() if self.feed else None,
+                    activity=self.activity.cpu() if self.activity is not None else None)
+
+    def load_state_dict(self, d):
+        self.variety.load_state_dict(d["variety"])
+        if self.feed and d.get("feed"):
+            self.feed.load_state_dict(d["feed"])
+        if d.get("activity") is not None:
+            self.activity = d["activity"].to(self.dev)
 
     def step(self, img, f, trace=None):
         """Frame f from the previous state. With trace={} every intermediate image is recorded in it."""
         c, fps = self.c, self.c["fps"]
         rec = (lambda k, v: trace.__setitem__(k, v.detach().clone())) if trace is not None else (lambda k, v: None)
         rec("previous", img)
-        t = f / fps
-        img = warp_stack(img, t, c["warp"], 1.0 / fps, c["seconds"], c["resample"]); rec("warp", img)
+        t, dt = f / fps, 1.0 / fps
+        xy = warp_coords(img, t, c["warp"], dt, c["seconds"])
+        img = resample(img, xy, c["warp"], dt, c["resample"]); rec("warp", img)
         img = sharpen(img, c["sharpen"] / 2); rec("sharpen", img)
-        img = img + self.noise * torch.randn_like(img); rec("noise", img)
+        if self.feed is not None:   # world-locked feed is carried by the same motion as the picture
+            img = self.feed.apply(img, t, lambda s: resample(s, xy, c["warp"], dt, "bilinear", prism=False), self.activity)
+        rec("feed", img)
         img = torch.einsum("ij,bjhw->bihw", self.hue, img).clamp(0, 1); rec("hue", img)
         img = tone(img, c["target_mean"], c["target_std"]); rec("tone", img)
-        lw = layer_weights(t, c["layer_period"], c["object_bias"])
+        lw = self.variety.layers(t)
+        self.variety.before()
+        before = img
         scales = [] if trace is not None else None
         for i in range(c["steps"]):
-            g = sum(grad_at_scale(self.model, img, s, lw, self.dev, self.amp, scales if i == 0 else None) for s in c["scales"])
+            g = sum(grad_at_scale(self.model, img, s, lw, self.dev, self.amp, scales if i == 0 else None, self.variety.shift(s))
+                    for s in c["scales"])
             g = g / len(c["scales"])
             if self.guide is not None:     # mix in the push toward the prompt (both gradients have mean |g| = 1)
                 w = c["prompt_weight"]
@@ -568,6 +754,9 @@ class Dreamer:
             if trace is not None and i == 0:
                 trace["scales"] = scales; trace["grad"] = g.detach().clone()
             img = (img + self.lr * g).clamp(0, 1).detach()
+        self.variety.after()
+        if self.feed is not None and self.feed.needs_activity:   # 1/8 size map of how much the dream changed
+            self.activity = F.avg_pool2d((img - before).abs().sum(1, keepdim=True), 8, ceil_mode=True)
         if trace is not None:
             trace["after"] = img.detach().clone(); trace["layer_weights"] = [float(x) for x in lw]
             trace["t"] = t
@@ -629,6 +818,10 @@ def main():
     dreamer = Dreamer(c, dev)          # builds the network before seeding, as before
     print("Model:", c["model"])
     print("Motion:", " + ".join(m["kind"] for m in c["warp"]["stack"]) or "none (still picture)")
+    print("Feed:", "; ".join(dreamer.feed.describe(H, W)) if dreamer.feed else "none")
+    v = [f"{k} {c[k]:g}" for k in ("jitter", "channel_drift", "novelty", "layer_walk") if c[k] > 0]
+    if v:
+        print("Variety:", ", ".join(v))
     if dreamer.guide is not None:
         print(f"Prompt ({c['prompt_weight']:g}):", dreamer.guide.description)
     live = os.path.join(work, "live.jpg")    # latest frame, for the editor's live view
@@ -645,7 +838,10 @@ def main():
         if seg == 0:
             img = make_seed(H, W, dev, c["seed"], c["init_image"])
         else:
-            img = torch.load(os.path.join(work, f"state_{seg-1:03d}.pt"), map_location=dev).float()
+            st = torch.load(os.path.join(work, f"state_{seg-1:03d}.pt"), map_location=dev, weights_only=False)
+            if isinstance(st, dict):   # chunks saved before the feed stack hold only the picture
+                dreamer.load_state_dict(st["dreamer"]); st = st["img"]
+            img = st.float()
         wr = open_writer(out_path + ".tmp.mp4", c)
         f_end = min(N, (seg + 1) * SEG)
         for f in range(seg * SEG, f_end):
@@ -666,7 +862,7 @@ def main():
                 el = time.time() - t0
                 print(f"\r  frame {done}/{N}  ({done/N*100:4.1f}%)  elapsed {el/60:5.1f} min", end="", flush=True)
         wr.stdin.close(); wr.wait()
-        torch.save(img.half().cpu(), st_path)
+        torch.save(dict(img=img.half().cpu(), dreamer=dreamer.state_dict()), st_path)
         os.replace(out_path + ".tmp.mp4", out_path)
         print(f"\n  segment {seg+1}/{nseg} done")
 

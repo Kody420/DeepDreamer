@@ -23,7 +23,7 @@ IMAGE_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", "
              ".webp": "image/webp", ".tif": "image/tiff", ".tiff": "image/tiff", ".gif": "image/gif"}
 PY = os.path.join(ROOT, "venv", "Scripts", "python.exe")
 PORT = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else int(os.environ.get("DREAM_EDITOR_PORT", "8765"))
-VERSION = 6                   # bump with every change to the API; index.html checks it
+VERSION = 7                   # bump with every change to the API; index.html checks it
 TOKEN = secrets.token_hex(16)   # every API call must carry it, so other web pages can't drive the editor
 
 
@@ -31,9 +31,11 @@ TOKEN = secrets.token_hex(16)   # every API call must carry it, so other web pag
 def read_settings(path=INI):
     cp = configparser.ConfigParser(inline_comment_prefixes=("#", ";"), interpolation=None)
     cp.read(path, encoding="utf-8")
-    s = {sec: {k: v.strip() for k, v in cp[sec].items()} for sec in ("render", "preview", "warp") if sec in cp}
+    s = {sec: {k: v.strip() for k, v in cp[sec].items()} for sec in ("render", "preview", "warp", "feed") if sec in cp}
     if "warp" not in s and "render" in s:
         s["warp"] = warp_from_old(s["render"])
+    if "feed" not in s and "render" in s:
+        s["feed"] = feed_from_old(s["render"])
     return s
 
 
@@ -47,10 +49,23 @@ def warp_from_old(render):
     return w
 
 
-def replace_warp(lines, vals):
-    """The [warp] section (the Motion tab's stack) is always written whole: modules come and go, so updating it
-    key by key would leave old ones behind. An empty dict removes it, which brings back the classic warp."""
-    start = next((i for i, l in enumerate(lines) if re.match(r"^\s*\[warp\]\s*$", l)), None)
+def feed_from_old(render):
+    """Files from before the feed stack have no [feed]; they open as the stack dream.py renders them with
+    (feed_from_old there): their noise as a Grain module with one fresh value per pixel."""
+    noise = float(render.get("noise", "0") or 0)
+    if noise <= 0:
+        return {"stack": ""}
+    return {"stack": "grain", "grain.amount": str(noise), "grain.life": "0", "grain.grid": "pixel"}
+
+
+STACK_COMMENTS = {"warp": "; motion stack from the editor's Motion tab: modules run top to bottom (see README)",
+                  "feed": "; feed stack from the editor's Feed tab: new material for the dream, top to bottom (see README)"}
+
+
+def replace_stack(lines, name, vals):
+    """A stack section ([warp], the Motion tab; [feed], the Feed tab) is always written whole: modules come and go,
+    so updating it key by key would leave old ones behind. An empty dict removes it."""
+    start = next((i for i, l in enumerate(lines) if re.match(rf"^\s*\[{name}\]\s*$", l)), None)
     if start is not None:
         end = next((i for i in range(start + 1, len(lines)) if re.match(r"^\s*\[.+\]\s*$", lines[i])), len(lines))
         while end > start and not lines[end - 1].strip():
@@ -60,7 +75,7 @@ def replace_warp(lines, vals):
             del lines[start]          # don't leave a double blank line where the section was
     if not vals:
         return lines
-    block = ["[warp]", "; motion stack from the editor's Motion tab: modules run top to bottom (see README)"]
+    block = [f"[{name}]", STACK_COMMENTS[name]]
     block += [f"{k} = {v}" for k, v in vals.items()]
     if start is None:   # new: put it after [render], before [preview]
         start = next((i for i, l in enumerate(lines) if re.match(r"^\s*\[preview\]\s*$", l)), len(lines))
@@ -75,8 +90,9 @@ def write_settings(new):
     """Update values in place so comments and layout survive; append keys the file doesn't have yet."""
     with open(INI, encoding="utf-8") as fh:
         lines = fh.read().splitlines()
-    if "warp" in new:
-        lines = replace_warp(lines, new.pop("warp"))
+    for name in ("warp", "feed"):
+        if name in new:
+            lines = replace_stack(lines, name, new.pop(name))
     sec, seen, last_key_line = None, {}, {}
     out = []
     for line in lines:
@@ -231,7 +247,7 @@ def list_videos():
         st = os.stat(p)
         s = read_settings(ini) if os.path.exists(ini) else {}
         vids.append(dict(name=name, num=int(m.group(1)) if m else None, size=st.st_size, mtime=st.st_mtime,
-                         settings=s.get("render"), warp=s.get("warp")))
+                         settings=s.get("render"), warp=s.get("warp"), feed=s.get("feed")))
     vids.sort(key=lambda v: (v["num"] is None, -(v["num"] or 0), -v["mtime"]))
     return vids
 
@@ -362,7 +378,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, fh.read().replace("__TOKEN__", TOKEN), "text/html; charset=utf-8")
         if path.startswith("/media/"):
             return self._media(path[len("/media/"):])
-        if path in ("/warp.js", "/warp.css"):   # the Motion tab's stack editor and live preview
+        if path in ("/warp.js", "/warp.css", "/feed.js"):   # the Motion and Feed tabs' stack editors and previews
             with open(os.path.join(os.path.dirname(__file__), path[1:]), encoding="utf-8") as fh:
                 return self._send(200, fh.read(), "text/javascript; charset=utf-8" if path.endswith(".js") else "text/css; charset=utf-8")
         if path == "/api/image":   # thumbnail of the start image; <img> can't send headers, so the token is in the query
@@ -434,7 +450,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, "path": saved})
             data = json.loads(raw or b"{}")
             if path == "/api/save":
-                write_settings({s: {k: v for k, v in vals.items()} for s, vals in data.items() if s in ("render", "preview", "warp")})
+                write_settings({s: {k: v for k, v in vals.items()} for s, vals in data.items() if s in ("render", "preview", "warp", "feed")})
                 return self._send(200, {"ok": True, "settings": read_settings()})
             if path == "/api/run":
                 JOB.start(data.get("kind"), data)

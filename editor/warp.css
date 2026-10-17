@@ -2,7 +2,7 @@
    on the right (under the same save bar) and is built from the monitor's own classes (.tabs, .viewer, .readout,
    details.log), so it looks like the other tabs. Uses the editor's tokens and its .btn / .chip / .facts / .w. */
 .controls { container-type: inline-size }
-#warp { margin-top: 8px }
+#warp, #feed { margin-top: 8px }
 .wl { display: flex; flex-direction: column; gap: 8px; min-width: 0 }
 .mon-warp .wl-mon { display: flex; flex-direction: column; gap: 6px; min-width: 0;
   position: sticky; top: -10px; z-index: 3; background: var(--panel); margin-top: -10px; padding: 10px 0 6px }
@@ -112,7 +112,7 @@ details.wl-add > summary span { font: 400 12px var(--body); color: var(--muted) 
 /* Narrow browser window: the editor stacks the monitor above the settings. On the Motion tab the monitor sticks
    under the header, with a smaller preview, so it stays in view while the stack scrolls. */
 @media (max-width: 1000px) {
-  body[data-tab="motion"] .monitor { position: sticky; top: 0; z-index: 4; max-height: 62vh; border-bottom: 1px solid var(--line) }
+  body[data-tab="motion"] .monitor, body[data-tab="feed"] .monitor { position: sticky; top: 0; z-index: 4; max-height: 62vh; border-bottom: 1px solid var(--line) }
   .mon-warp .wl-screen { width: min(100%, calc(32vh * var(--wl-aspect, 1.7778))); margin: 0 auto }
 }
 @media (prefers-reduced-motion: reduce) { details.wl-add > summary::before { transition: none } }

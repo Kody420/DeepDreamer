@@ -194,6 +194,7 @@ details.log pre { font: 11px/1.4 var(--mono); background: #090b0e; border-radius
   <div class="tabs dream-only" role="tablist" aria-label="Settings">
     <button role="tab" id="tab-editor" aria-selected="true" aria-controls="view-editor">Editor<span class="n" hidden></span></button>
     <button role="tab" id="tab-motion" aria-selected="false" aria-controls="view-editor">Motion<span class="n" hidden></span></button>
+    <button role="tab" id="tab-feed" aria-selected="false" aria-controls="view-editor">Feed<span class="n" hidden></span></button>
     <button role="tab" id="tab-output" aria-selected="false" aria-controls="view-editor">Output<span class="n" hidden></span></button>
   </div>
   <span class="spacer"></span>
@@ -209,6 +210,7 @@ details.log pre { font: 11px/1.4 var(--mono); background: #090b0e; border-radius
     </div>
     <div id="groups"></div>
     <div id="warp" hidden></div>
+    <div id="feed" hidden></div>
     <p class="status" style="margin-top:14px">Measured guidance from the <a href="https://claude.ai/artifact/4hQLch6YL9zqVKKWzGNRvt" target="_blank" rel="noopener">DeepDreamer Settings Atlas</a>. Single renders vary a lot with the seed; treat the numbers as typical values.</p>
   </section>
 
@@ -219,6 +221,7 @@ details.log pre { font: 11px/1.4 var(--mono); background: #090b0e; border-radius
       <button class="btn primary" id="btn-save" disabled>Save settings.ini</button>
     </div>
     <div class="mon-warp" id="warp-side" hidden></div>
+    <div class="mon-warp" id="feed-side" hidden></div>
     <div class="mon-out" id="mon-out">
     <div class="viewer">
       <div class="screen"><video id="player" controls loop muted playsinline></video>
@@ -286,9 +289,10 @@ details.log pre { font: 11px/1.4 var(--mono); background: #090b0e; border-radius
 <div class="toast" id="toast" hidden></div>
 
 <script src="/warp.js"></script>
+<script src="/feed.js"></script>
 <script>
 const TOKEN = "__TOKEN__";
-const EDITOR_VERSION = 6;   // must match VERSION in server.py
+const EDITOR_VERSION = 7;   // must match VERSION in server.py
 // fetch, but when the editor isn't running any more say so, instead of the browser's "Failed to fetch"
 const net = (url, opts) => fetch(url, opts).catch(() => {
   throw new Error("The editor isn't answering. Check that its window (4_EDITOR.bat) is still open, then reload this page.");
@@ -337,13 +341,24 @@ const GROUPS = [
     help: "0 eyes and spirals · 0.5 birds and feathers · 0.8 glossy eggs, faces, objects · 1 whole animals and objects.",
     chips: [["eyes", 0], ["birds", 0.5], ["eggs & faces", 0.8], ["animals", 1]] },
   { k: "layer_period", name: "Layer cycle (s)", min: 0.5, max: 60, step: 0.5, tags: ["feedback"],
-    help: "Seconds per cycle through textures → eyes → objects. Ignored when object_bias is 1, weak above 0.8." },
+    help: "Seconds per cycle through textures → eyes → objects. Ignored when object_bias is 1, weak above 0.8. With Layer wander on, it sets how fast the wander moves instead." },
   { k: "steps", name: "Steps per frame", min: 1, max: 4, step: 1, int: true, tags: ["feedback", "fps"],
     help: "2 looks like double strength and renders twice as slowly. Raise strength instead." },
   { k: "sharpen", name: "Sharpen", min: 0, max: 0.5, step: 0.01, tags: ["feedback", "fps"],
     help: "Crisper scales and eyes, shorter intro, a little busier. Twice as strong at 60 fps; above ~0.3 grain builds up." },
-  { k: "noise", name: "Fresh noise", min: 0, max: 0.06, step: 0.001, tags: ["feedback"],
-    help: "0–0.01 makes no visible difference. 0.05 slows the start and dulls colours." },
+ ]},
+ { tab: "editor", title: "Variety", sub: "what the network looks for changes as the video goes on (0 = the plain dream)", items: [
+  { k: "channel_drift", name: "Taste drift", min: 0, max: 1, step: 0.01, def: 0, tags: ["feedback"],
+    help: "Each of the network's feature detectors gets a weight that wanders, so it favours fur and snouts for a while, then pagodas or jellyfish. 0 weighs them all equally, as before.",
+    chips: [["off", 0], ["gentle", 0.3], ["clear", 0.6], ["strong", 1]] },
+  { k: "channel_period", name: "Taste period (s)", min: 0.5, max: 60, step: 0.5, def: 8, tags: ["feedback"],
+    help: "Roughly how many seconds a taste lasts before it has wandered somewhere else." },
+  { k: "novelty", name: "Boredom", min: 0, max: 1, step: 0.01, def: 0, tags: ["feedback"],
+    help: "Turns down the feature detectors that have carried the picture for the last few seconds, so whatever has been growing for a while fades and something else takes over." },
+  { k: "layer_walk", name: "Layer wander", min: 0, max: 1, step: 0.01, def: 0, tags: ["feedback"],
+    help: "0 follows the layer cycle. 1 wanders between layers at random instead; Kind of things then tilts the wander toward objects rather than fixing it, so “animals” still varies. The cycle length sets how fast it wanders." },
+  { k: "jitter", name: "Jitter", min: 0, max: 8, step: 1, int: true, def: 0, tags: ["feedback"],
+    help: "Shifts the picture by up to this many network pixels before each look, as the original DeepDream did. Stops patterns from locking to the pixel grid. 1–2 is plenty." },
  ]},
  { tab: "editor", title: "Colour & light", sub: "working image and final grade", items: [
   { k: "hue_rate", name: "Colour cycling", min: 0, max: 1.5, step: 0.01, tags: ["feedback"],
@@ -396,10 +411,11 @@ const ENCODERS = [["CPU (x264, best quality)", "-c:v libx264 -preset fast -crf 1
 const SIZES = [["1920×1080", "1920", "1080"], ["1280×720", "1280", "720"], ["3840×2160", "3840", "2160"], ["960×540", "960", "540"]];
 
 // ----------------------------------------------------------------------------- state
-let saved = { render: {}, preview: {}, warp: {} };   // as in settings.ini
-let cur = { render: {}, preview: {}, warp: {} };     // edited values (strings); warp = the Motion tab's stack
+let saved = { render: {}, preview: {}, warp: {}, feed: {} };   // as in settings.ini
+let cur = { render: {}, preview: {}, warp: {}, feed: {} };     // edited values (strings); warp / feed = the Motion / Feed tabs' stacks
 let warp = null;   // the Motion tab (editor/warp.js)
-const SECTIONS = ["render", "preview", "warp"];
+let feed = null;   // the Feed tab (editor/feed.js)
+const SECTIONS = ["render", "preview", "warp", "feed"];
 const withSections = s => { for (const k of SECTIONS) s[k] = s[k] || {}; return s; };
 const sectionOf = g => g.section || "render";
 
@@ -498,7 +514,7 @@ function control(it, sec) {
 
 function writeControls() {
   for (const g of GROUPS) for (const it of g.items) {
-    const sec = sectionOf(g), id = `${sec}-${it.k}`, v = cur[sec][it.k] ?? "";
+    const sec = sectionOf(g), id = `${sec}-${it.k}`, v = cur[sec][it.k] ?? (it.def !== undefined ? String(it.def) : "");   // def: settings older files don't have yet
     const act = document.activeElement;
     const put = (sel, val) => { const e = document.getElementById(sel); if (e && e !== act) e.value = val; };
     if (it.type === "size") {
@@ -520,7 +536,7 @@ function writeControls() {
   }
   const sc = document.getElementById("render-scales");
   sc.classList.toggle("bad-input", !parseScales(cur.render.scales));
-  document.querySelector('.ctl[data-sec="render"][data-k="layer_period"]').classList.toggle("dimmed", +cur.render.object_bias >= 1);
+  document.querySelector('.ctl[data-sec="render"][data-k="layer_period"]').classList.toggle("dimmed", +cur.render.object_bias >= 1 && !(+cur.render.layer_walk > 0));
   // prompt_mode = none: grey out the prompt group and lock everything in it except the mode switch
   const off = (cur.render.prompt_mode || "clip") === "none";
   const group = document.querySelector('.ctl[data-k="prompt_mode"]').closest("fieldset");
@@ -535,7 +551,7 @@ function writeControls() {
     b.hidden = !n; b.textContent = `${n} changed`;
   });
   for (const t of CTL_TABS) {
-    const n = document.querySelectorAll(`fieldset.group[data-tab="${t}"] .ctl.changed:not([data-wk])`).length + (t === "motion" ? changes().filter(c => c[0] === "warp").length : 0), b = $(`#tab-${t} .n`);
+    const n = document.querySelectorAll(`fieldset.group[data-tab="${t}"] .ctl.changed:not([data-wk])`).length + (t === "motion" || t === "feed" ? changes().filter(c => c[0] === (t === "motion" ? "warp" : "feed")).length : 0), b = $(`#tab-${t} .n`);
     b.hidden = !n; b.textContent = n; b.title = `${n} unsaved change${n > 1 ? "s" : ""}`;
   }
 }
@@ -586,6 +602,7 @@ function changes() {
 
 function refresh() {
   warp?.sync();
+  feed?.sync();
   writeControls();
   const n = changes().length;
   $("#dirty").innerHTML = n ? `<b>${n} unsaved change${n > 1 ? "s" : ""}</b>` : "All changes saved";
@@ -627,6 +644,12 @@ function interp(table, x, log = false) {
 const LIFE = [[0.05, 7.5], [0.1, 4.7], [0.2, 3.0], [0.35, 2.1], [0.5, 1.3], [0.8, 0.9], [1.2, 0.6]];
 const INTRO = [[0.67, 8], [1.0, 5.5], [1.6, 2], [2.6, 0.5]];
 const BUSY = [[0.5, 0.1], [1.0, 0.3], [1.6, 0.6], [2.6, 0.8], [4, 0.9]];
+
+// the Variety settings that are on, for the readout
+function variety(r) {
+  const on = [["channel_drift", "taste drift"], ["novelty", "boredom"], ["layer_walk", "layer wander"], ["jitter", "jitter"]].filter(([k]) => +r[k] > 0);
+  return on.map(([k, n]) => `${n} ${fmt(r[k])}`).join(", ");
+}
 
 function readout() {
   const r = cur.render, num = k => +r[k];
@@ -680,6 +703,8 @@ function readout() {
     <dt>Picture</dt><dd><div class="meter"><span>calm</span><div class="track"><div class="knob" style="left:${(busy * 100).toFixed(0)}%"></div></div><span>busy</span></div>${busyWord}</dd>
     ${promptOn(r) ? `<dt>Prompt</dt><dd>${esc(r.prompt_mode || "clip")} at strength <b>${fmt(num("prompt_weight"))}</b></dd>` : ""}
     <dt>Motion</dt><dd>${esc(ws.names.join(" + ") || "none, a still picture")} <span class="status">(Motion tab)</span></dd>
+    <dt>Feed</dt><dd>${esc((feed ? feed.summary().names : []).join(" + ") || "none")} <span class="status">(Feed tab)</span></dd>
+    ${variety(r) ? `<dt>Variety</dt><dd>${esc(variety(r))}</dd>` : ""}
     <dt>Colour</dt><dd>${cycle}</dd>
     <dt>Render</dt><dd>${frames} frames · about <b>${cost < 1.5 ? cost.toFixed(1) : Math.round(cost)}×</b> the work of a 24 s base test</dd>`;
 
@@ -695,7 +720,6 @@ function readout() {
   if ((+r.steps || 1) > 1) add("", `steps ${r.steps}: same as more strength, ${r.steps}× slower.`);
   if (Math.max(...sc) > 1) add("", "A scale above 1 runs the network on an enlarged frame: much slower renders.");
   if (ws.zoom > 1) add("", "Zoom above 1:frames get darker and softer, there's little time to add detail.");
-  if (num("noise") > 0.03) add("", "Noise above 0.03 slows the start and dulls colours.");
   if (num("target_std") <= 0.13) add("", "Low working contrast: muted colours, fast takeover.");
   if (num("target_std") >= 0.28) add("", "High working contrast: punchy, but slow to form and leans to objects.");
   if (life && num("seconds") && num("seconds") < 8) add("warn", "Very short: most of it will be the intro.");
@@ -784,7 +808,7 @@ function startPolling() { if (!polling) polling = setInterval(pollJob, 1000); po
 async function save() {
   if (!parseScales(cur.render.scales)) throw new Error("Fix scales first.");
   const body = { render: {}, preview: {} };
-  for (const [sec, k] of changes()) if (sec === "warp") body.warp = { ...cur.warp }; else body[sec][k] = cur[sec][k] ?? "";
+  for (const [sec, k] of changes()) if (sec === "warp" || sec === "feed") body[sec] = { ...cur[sec] }; else body[sec][k] = cur[sec][k] ?? "";
   const r = await api("/api/save", body);
   saved = withSections(r.settings); cur = JSON.parse(JSON.stringify(saved)); refresh();
 }
@@ -848,6 +872,7 @@ $("#grid").addEventListener("click", e => {
     const v = videos[+l.dataset.load];
     for (const [k, val] of Object.entries(v.settings)) cur.render[k] = val;
     cur.warp = { ...(v.warp || {}) };   // older videos come as the Zoom + Spin stack (server.py warp_from_old)
+    cur.feed = { ...(v.feed || { stack: "" }) };   // and their noise as a per-pixel Grain (server.py feed_from_old)
     if (!v.settings.resample) cur.render.resample = "bicubic";   // made before the setting existed
     if (!v.settings.model) cur.render.model = "vgg16";
     refresh(); selectTab(ctlTab); toast(`Loaded settings of video ${v.num ?? v.name} (not saved yet)`);
@@ -895,8 +920,8 @@ $("#ag-results").addEventListener("click", async e => {
 // DeepDreamer has settings tabs (each shows its own groups beside the monitor) and Videos, a full-window
 // gallery. The view is kept in the URL so a refresh stays put.
 const MODES = { dream: "DeepDreamer", t2i: "Text to Image" };
-const CTL_TABS = ["editor", "motion", "output"];
-const HASH = { editor: "", motion: "#motion", output: "#output", gallery: "#videos", attngan: "#text-to-image" };
+const CTL_TABS = ["editor", "motion", "feed", "output"];
+const HASH = { editor: "", motion: "#motion", feed: "#feed", output: "#output", gallery: "#videos", attngan: "#text-to-image" };
 let ctlTab = "editor", dreamTab = "editor";
 function selectTab(name) {
   const mode = name === "attngan" ? "t2i" : "dream";
@@ -909,9 +934,11 @@ function selectTab(name) {
   document.querySelectorAll("fieldset.group[data-tab]").forEach(fs => fs.hidden = fs.dataset.tab !== ctlTab);
   // the Motion tab swaps the monitor's video for the motion preview; the save bar stays
   $("#warp").hidden = $("#warp-side").hidden = ctlTab !== "motion";
-  $("#mon-out").hidden = ctlTab === "motion";
+  $("#feed").hidden = $("#feed-side").hidden = ctlTab !== "feed";
+  $("#mon-out").hidden = ctlTab === "motion" || ctlTab === "feed";
   document.body.dataset.tab = ctlTab;
   warp?.show(name === "motion");
+  feed?.show(name === "feed");
   $("#btn-videos").setAttribute("aria-pressed", name === "gallery");
   document.body.dataset.mode = mode;
   $("#mode-title").textContent = document.title = MODES[mode];
@@ -982,6 +1009,10 @@ warp = WarpLab.mount({
   runJob: async (kind, opts) => { await api("/api/run", { kind, ...opts }); lastResult = null; startPolling(); },
   stopJob: () => api("/api/stop", {}).then(pollJob).catch(e => toast(e.message)),
 }) || WarpLab;
+feed = FeedLab.mount({
+  root: $("#feed"), side: $("#feed-side"), get: () => cur.feed, saved: () => saved.feed, set: d => { cur.feed = d; refresh(); },
+  render: () => cur.render, motion: () => warp ? warp.summary().names : [], toast,
+}) || FeedLab;
 selectTab(dreamTab);
 loadState(true).catch(e => { document.body.insertAdjacentHTML("afterbegin", `<div class="w bad" style="margin:12px">Could not reach the editor server: ${esc(e.message)}. Start it with 4_EDITOR.bat.</div>`); });
 </script>

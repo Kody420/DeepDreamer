@@ -56,6 +56,7 @@ venv\Scripts\python.exe attngan\setup_files.py
 | `settings.ini` | All render settings, each with a comment explaining it |
 | `editor/server.py`, `editor/index.html` | The browser editor: a small local web server (Python standard library only) and the page |
 | `editor/warp.js`, `editor/warp.css` | The editor's Motion tab: the motion stack and its live WebGL preview |
+| `feed.py`, `editor/feed.js` | The feed stack (new material for the dream each frame) and the editor's Feed tab |
 | `video_motion.py` | Extracts a clip's motion (optical flow or codec vectors) for the Video motion module |
 | `attngan/generate.py` | AttnGAN text-to-image, ported to current PyTorch |
 | `attngan/setup_files.py` | Downloads the AttnGAN files and converts them to safe formats |
@@ -75,6 +76,7 @@ Created when you use it, and not tracked by git: `venv/`, `output/` (your videos
 | Animals and objects instead of eyes | `object_bias` 0.8–1 |
 | A faster start and a busier picture | higher `strength` |
 | A different video with the same look | a different `seed` |
+| A video that keeps changing what it shows | a Feed stack the network can see, and Taste drift or Boredom under Variety |
 
 The editor explains every setting and warns about combinations that look bad.
 
@@ -130,6 +132,64 @@ video.offset = 0               ; where in the clip to start, 0 to 1
 - The clip is cropped to the video's shape the way start images are. Camera footage often moves much more per
   frame than a zoom; if the Motion check warns, lower the strength.
 - The editor's preview can show the clip's own first frame (**Picture: Clip**) to check that the motion follows it.
+
+## Feed stack
+
+Every frame the motion moves the picture and the network repaints it. The editor's **Feed** tab adds new
+material in between, for the dream to grow into something else. It is saved as a `[feed]` section and works
+like the motion stack: modules run top to bottom, values can follow curves, and a module can be limited to a
+disc around its pivot (`near`), everything outside it (`away`), or the parts the dream has stopped changing
+(`idle`).
+
+```ini
+[feed]
+stack = grain, seeds, reseed
+grain.amount = 0.006 ~ pulse(period=6, depth=0.15)
+grain.grid = matched           ; matched: drawn at the painting sizes / pixel: one value per pixel / size: grain.size
+grain.life = 1.5               ; seconds each pattern lives (0 = new every frame)
+grain.lock = world             ; world: carried along by the motion, so it grows with the thing it landed on
+grain.where = near 0.45 soft 0.6
+seeds.rate = 3                 ; dots, rings and eyes per second
+reseed.every = 8               ; seconds between fresh discs of noise at the pivot
+```
+
+| Module | What it adds |
+|---|---|
+| Grain | Random values. Drawn at the painting sizes, the network receives almost all of it |
+| Colour patches | Large, slow patches of colour that leave brightness alone |
+| Marble | Domain-warped fractal noise: veins, folds and contours |
+| Turing patterns | A small reaction–diffusion simulation: spots that split, worms or mazes |
+| Seeds | Dots, rings and dot-in-ring eyes dropped at a set rate |
+| Mirror | Pulls the picture toward its own mirror image across a line through the pivot |
+| Reseed | Every few seconds, fresh noise in a soft disc at the pivot, like the video's start |
+| Pictures | Every few seconds, one of your pictures (`init_images\` by default) dissolved into a soft disc |
+
+- **Why it matters:** the network looks at a shrunken copy of the frame (`scales`). The old `noise` was one
+  random value per pixel, and shrinking averages that away: at scale 0.12 only about 8% of it reaches the
+  network. Grain drawn at the painting sizes arrives almost whole. The render log prints how much of each
+  Grain module gets through.
+- Amounts are per frame at 30 fps and scaled for 60 fps. Fields that are held for a while (Grain with a life,
+  Colour, Marble, Turing) are added again every frame, so keep them small: 0.004–0.01.
+- `near` and `away` keep the same total amount and concentrate it. With a centred zoom, things born near the
+  centre stay on screen longest and grow the most.
+- The preview shows what the feed adds, what the network gets of it after the shrink (**Seen by the
+  network**), and where. It has no motion and no network; judge the material, not the result.
+- Settings files from before the feed stack have no `[feed]` section. Their `noise` is read as a Grain module
+  with one fresh value per pixel, which is what the old noise was. An empty stack adds nothing.
+
+## Variety
+
+Four settings in the Editor tab's **Variety** group change what the network looks for as the video goes on.
+At 0 the dream is exactly as before.
+
+| Setting | What it does |
+|---|---|
+| `channel_drift` (Taste drift), `channel_period` | Each feature detector gets a slowly wandering weight, so the network favours fur and snouts for a while, then pagodas or jellyfish |
+| `novelty` (Boredom) | Turns down the detectors that have carried the picture for the last few seconds, so something else takes over |
+| `layer_walk` (Layer wander) | Wanders between the five layers at random instead of cycling. `object_bias` then tilts the wander instead of fixing it |
+| `jitter` | Shifts the picture by up to this many network pixels before each look, as the original DeepDream did |
+
+Renders save this state, and the feed's, with each chunk, so an interrupted render continues the same way.
 
 ## Credits
 

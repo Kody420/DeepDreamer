@@ -29,7 +29,9 @@ Notes
 - Interrupted? Just run 3_RENDER.bat again, it resumes from the last finished 30 s segment.
 - For a different video: change "seed" and run 3_RENDER.bat again.
 - Wilder / more objects: raise "strength", add scales < 0.4 (e.g. 0.25,0.4,0.7,1.0).
-  More stable: lower "strength", raise "noise" slightly.
+  More stable: lower "strength".
+- Keeps showing the same kind of thing? Add a Feed stack (editor's Feed tab), or Taste drift / Boredom
+  in the Editor tab's Variety group. The old "noise" setting barely reaches the network.
 - More "things" (animals, objects) and fewer eyes: object_bias = 0.8 to 1.
 - Low zoom_rate (e.g. 0.2) turning into tiny dense cells: use smaller scales
   (e.g. 0.15,0.25,0.4), sharpen = 0 and a lower strength (e.g. 1.5).
