@@ -16,11 +16,14 @@ INI = os.path.join(ROOT, "settings.ini")
 OUTPUT = os.path.join(ROOT, "output")
 ATTN_OUT = os.path.join(ROOT, "attngan", "last")  # latest text-to-image results
 INIT_DIR = os.path.join(ROOT, "init_images")     # start images picked in the editor are copied here
+CLIP_DIR = os.path.join(ROOT, "clips")           # clips for the video motion module are copied here
+VIDEO_EXT = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime", ".mkv": "video/x-matroska",
+             ".webm": "video/webm", ".avi": "video/x-msvideo"}
 IMAGE_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".bmp": "image/bmp",
              ".webp": "image/webp", ".tif": "image/tiff", ".tiff": "image/tiff", ".gif": "image/gif"}
 PY = os.path.join(ROOT, "venv", "Scripts", "python.exe")
 PORT = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else int(os.environ.get("DREAM_EDITOR_PORT", "8765"))
-VERSION = 5                   # bump with every change to the API; index.html checks it
+VERSION = 6                   # bump with every change to the API; index.html checks it
 TOKEN = secrets.token_hex(16)   # every API call must carry it, so other web pages can't drive the editor
 
 
@@ -28,7 +31,20 @@ TOKEN = secrets.token_hex(16)   # every API call must carry it, so other web pag
 def read_settings(path=INI):
     cp = configparser.ConfigParser(inline_comment_prefixes=("#", ";"), interpolation=None)
     cp.read(path, encoding="utf-8")
-    return {sec: {k: v.strip() for k, v in cp[sec].items()} for sec in ("render", "preview", "warp") if sec in cp}
+    s = {sec: {k: v.strip() for k, v in cp[sec].items()} for sec in ("render", "preview", "warp") if sec in cp}
+    if "warp" not in s and "render" in s:
+        s["warp"] = warp_from_old(s["render"])
+    return s
+
+
+def warp_from_old(render):
+    """Files from before the motion stack have no [warp]; they open as the stack dream.py renders them with
+    (warp_from_old there): zoom_rate as a Zoom module, the rotate_rate wobble as a Spin module on a sine."""
+    zr, rr = float(render.get("zoom_rate", "0.4") or 0), float(render.get("rotate_rate", "0.05") or 0)
+    w = {"stack": "zoom, spin" if rr > 0 else "zoom", "zoom.rate": str(zr)}
+    if rr > 0:
+        w["spin.rate"] = f"0 ~ sine(period=20.944, depth={min(1.0, 6 * rr):.4g})"
+    return w
 
 
 def replace_warp(lines, vals):
@@ -129,7 +145,7 @@ class Job:
             self.frame, self.frames = int(m.group(1)), int(m.group(2))
             self.partial = text
             return
-        m = re.search(r"Saved video as (\S+\.mp4)", text)
+        m = re.search(r"Saved (?:video|motion) as (\S+\.(?:mp4|npz))", text)
         if m:
             self.result = m.group(1).replace("\\", "/")
         if text.strip():
@@ -168,6 +184,14 @@ class Job:
                 cmd = [PY, os.path.join(ROOT, "dream.py"), "--preview"]
             elif kind == "render":
                 cmd = ["cmd", "/c", os.path.join(ROOT, "3_RENDER.bat")]
+            elif kind == "motion":   # extract a clip's motion for the video module (video_motion.py)
+                o = opts or {}
+                clip = resolve(str(o.get("clip", "")))
+                if not os.path.isfile(clip):
+                    raise ValueError("Pick a clip first.")
+                source = o.get("source") if o.get("source") in ("flow", "codec") else "flow"
+                gaps = o.get("gaps") if o.get("gaps") in ("zero", "hold") else "hold"
+                cmd = [PY, os.path.join(ROOT, "video_motion.py"), clip, "--source", source, "--gaps", gaps]
             elif kind == "attngan":
                 o = opts or {}
                 ds = o.get("dataset") if o.get("dataset") in ("birds", "coco") else "birds"
@@ -210,6 +234,50 @@ def list_videos():
                          settings=s.get("render"), warp=s.get("warp")))
     vids.sort(key=lambda v: (v["num"] is None, -(v["num"] or 0), -v["mtime"]))
     return vids
+
+
+def resolve(p):
+    p = p.strip().strip('"')
+    return p if os.path.isabs(p) else os.path.join(ROOT, p)
+
+
+def save_clip(name, data):
+    """Store a clip picked in the browser in clips\\ (reusing an identical one) and return its full path."""
+    import hashlib
+    base, ext = os.path.splitext(os.path.basename(name or "clip.mp4"))
+    if ext.lower() not in VIDEO_EXT:
+        raise ValueError("That is not a video file (use MP4, MOV, MKV, WEBM or AVI).")
+    base = re.sub(r"[^\w\-. ]+", "_", base).strip(" .") or "clip"
+    os.makedirs(CLIP_DIR, exist_ok=True)
+    digest = hashlib.sha1(data).hexdigest()
+    for i in range(1000):
+        p = os.path.join(CLIP_DIR, f"{base}{'' if i == 0 else f'-{i}'}{ext.lower()}")
+        if not os.path.exists(p):
+            with open(p, "wb") as fh:
+                fh.write(data)
+            return p
+        with open(p, "rb") as fh:
+            if hashlib.sha1(fh.read()).hexdigest() == digest:
+                return p
+    raise ValueError("Too many clips with that name in clips.")
+
+
+def motion_field(q):
+    """The 64 px preview copy of a clip's extracted motion: 4-byte header length, JSON header, raw float16."""
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
+    import numpy as np, video_motion
+    clip = resolve(q.get("clip", [""])[0])
+    if not os.path.isfile(clip):
+        return None, "clip not found"
+    source = q.get("source", ["flow"])[0]
+    p = video_motion.cache_path(clip, source if source in ("flow", "codec") else "flow", q.get("gaps", ["hold"])[0])
+    if not os.path.exists(p):
+        return None, "not extracted"
+    z = np.load(p)
+    pv = np.ascontiguousarray(z["preview"].astype(np.float16))
+    head = json.dumps(dict(n=int(pv.shape[0]), h=int(pv.shape[2]), w=int(pv.shape[3]), fps=float(z["fps"]), aspect=float(z["aspect"]))).encode()
+    return len(head).to_bytes(4, "little") + head + pv.tobytes(), None
 
 
 def save_init_image(name, data):
@@ -309,8 +377,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, {"error": "not found"})
             with open(p, "rb") as fh:
                 return self._send(200, fh.read(), IMAGE_EXT[ext])
+        if path == "/api/clip":   # a picked clip, for the Motion tab's preview picture (token in the query, like /api/image)
+            q = parse_qs(urlparse(self.path).query)
+            if q.get("token", [""])[0] != TOKEN:
+                return self._send(403, {"error": "forbidden"})
+            p = resolve(q.get("path", [""])[0])
+            if os.path.splitext(p)[1].lower() not in VIDEO_EXT or not os.path.isfile(p):
+                return self._send(404, {"error": "not found"})
+            return self._media("", p)
         if not self._api_ok():
             return self._send(403, {"error": "missing token - reload the page"})
+        if path == "/api/motion":
+            body, err = motion_field(parse_qs(urlparse(self.path).query))
+            if body is None:
+                return self._send(404, {"error": err, "missing": err == "not extracted"})
+            return self._send(200, body, "application/octet-stream")
         if path == "/api/state":
             return self._send(200, dict(version=VERSION, settings=read_settings(), job=JOB.state(), videos=list_videos(),
                                         unfinished=os.path.isdir(os.path.join(ROOT, "work")),
@@ -328,17 +409,30 @@ class Handler(BaseHTTPRequestHandler):
     do_HEAD = do_GET
 
     def do_POST(self):
+        # Take in the whole body before answering, even to refuse it: a browser whose upload is cut off halfway
+        # only reports "Failed to fetch", not the reason.
+        n = int(self.headers.get("Content-Length") or 0)
+        path = urlparse(self.path).path
+        limit = {"/api/upload_clip": 2 << 30, "/api/upload_image": 100 << 20}.get(path, 10 << 20)
+        if n > limit:
+            left = n
+            while left > 0:
+                chunk = self.rfile.read(min(left, 1 << 20))
+                if not chunk:
+                    break
+                left -= len(chunk)
+            return self._send(413, {"error": "That clip is larger than 2 GB." if path == "/api/upload_clip" else "That file is too large."})
+        raw = self.rfile.read(n) if n else b""
         if not self._api_ok():
-            return self._send(403, {"error": "missing token - reload the page"})
+            return self._send(403, {"error": "The editor was restarted after this page was opened. Reload the page."})
         try:
-            n = int(self.headers.get("Content-Length") or 0)
-            path = urlparse(self.path).path
-            if path == "/api/upload_image":
-                if n > 100 * 1024 * 1024:
-                    raise ValueError("Image is larger than 100 MB.")
-                saved = save_init_image(unquote(self.headers.get("X-Filename") or ""), self.rfile.read(n))
+            if path == "/api/upload_clip":
+                saved = save_clip(unquote(self.headers.get("X-Filename") or ""), raw)
                 return self._send(200, {"ok": True, "path": saved})
-            data = json.loads(self.rfile.read(n) or b"{}")
+            if path == "/api/upload_image":
+                saved = save_init_image(unquote(self.headers.get("X-Filename") or ""), raw)
+                return self._send(200, {"ok": True, "path": saved})
+            data = json.loads(raw or b"{}")
             if path == "/api/save":
                 write_settings({s: {k: v for k, v in vals.items()} for s, vals in data.items() if s in ("render", "preview", "warp")})
                 return self._send(200, {"ok": True, "settings": read_settings()})
@@ -364,12 +458,12 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # report to the page instead of dropping the connection
             return self._send(400, {"error": str(e)})
 
-    def _media(self, rel):
-        p = media_path(rel)
+    def _media(self, rel, p=None):
+        p = p or media_path(rel)
         if not p or not os.path.isfile(p):
             return self._send(404, {"error": "not found"})
         size = os.path.getsize(p)
-        ctype = {".mp4": "video/mp4", ".jpg": "image/jpeg", ".png": "image/png", ".json": "application/json"}.get(
+        ctype = {**VIDEO_EXT, ".jpg": "image/jpeg", ".png": "image/png", ".json": "application/json"}.get(
             os.path.splitext(p)[1].lower(), "text/plain; charset=utf-8")
         start, end = 0, size - 1
         rng = self.headers.get("Range")

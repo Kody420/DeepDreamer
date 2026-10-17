@@ -12,8 +12,6 @@
 .wl-head .sp { flex: 1 }
 .wl .chip[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); border-color: var(--accent) }
 .wl .chips { grid-column: auto }
-.wl-note { border-radius: 6px; padding: 5px 8px; font-size: 12px; background: var(--info-soft); color: var(--muted); display: flex; gap: 8px; align-items: center; flex-wrap: wrap }
-.wl-note b { color: var(--fg); font-weight: 600 }
 
 /* stack */
 .wl-stack { display: flex; flex-direction: column; gap: 4px }
@@ -118,3 +116,13 @@ details.wl-add > summary span { font: 400 12px var(--body); color: var(--muted) 
   .mon-warp .wl-screen { width: min(100%, calc(32vh * var(--wl-aspect, 1.7778))); margin: 0 auto }
 }
 @media (prefers-reduced-motion: reduce) { details.wl-add > summary::before { transition: none } }
+
+/* Video motion card: clip, source and status above the sliders */
+.wl-video { display: flex; flex-direction: column; gap: 4px; margin-bottom: 4px; padding: 6px 8px; border-radius: 5px; background: var(--panel-2); font-size: 12px; color: var(--muted) }
+.wl-video.drop { outline: 1px dashed var(--accent) }
+.wl-vrow { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; min-width: 0 }
+.wl-vrow label { display: flex; gap: 5px; align-items: center }
+.wl-vrow .pv { font-family: var(--mono); font-size: 11px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1 }
+.wl-vstat { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; color: var(--fg) }
+.wl-vstat:empty { display: none }
+.wl-video .hint { margin: 0; font-size: 12px }

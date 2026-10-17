@@ -56,19 +56,21 @@ venv\Scripts\python.exe attngan\setup_files.py
 | `settings.ini` | All render settings, each with a comment explaining it |
 | `editor/server.py`, `editor/index.html` | The browser editor: a small local web server (Python standard library only) and the page |
 | `editor/warp.js`, `editor/warp.css` | The editor's Motion tab: the motion stack and its live WebGL preview |
+| `video_motion.py` | Extracts a clip's motion (optical flow or codec vectors) for the Video motion module |
 | `attngan/generate.py` | AttnGAN text-to-image, ported to current PyTorch |
 | `attngan/setup_files.py` | Downloads the AttnGAN files and converts them to safe formats |
 | `1_SETUP.bat` … `4_EDITOR.bat` | Setup, preview, render and editor launchers |
 | `README.txt` | Short usage notes and tuning tips |
 
 Created when you use it, and not tracked by git: `venv/`, `output/` (your videos), `work/` and `work_preview/`
-(render chunks), `preview.mp4`, `init_images/` (start images picked in the editor) and the AttnGAN weights.
+(render chunks), `preview.mp4`, `init_images/` (start images picked in the editor), `clips/` and `video_motion/`
+(clips for the Video motion module and their extracted motion) and the AttnGAN weights.
 
 ## Tuning in brief
 
 | To get… | Change |
 |---|---|
-| Shapes that hold longer before morphing | lower `zoom_rate` (each shape lasts about 0.7 ÷ zoom_rate seconds) |
+| Shapes that hold longer before morphing | a slower Zoom module in the Motion tab (each shape lasts about 0.7 ÷ zoom speed seconds) |
 | Bigger shapes | smaller `scales`, e.g. `0.12,0.2,0.3` |
 | Animals and objects instead of eyes | `object_bias` 0.8–1 |
 | A faster start and a busier picture | higher `strength` |
@@ -98,8 +100,36 @@ melt.on = no                   ; kept, but switched off
   Flow and Stress views and the Motion check show where the motion stretches or tears the picture.
 - **Random warp** (R) builds a new stack that stays inside the Motion check's limits; **Re-roll settings**
   (Shift+R) keeps the modules and draws new values.
-- Without a `[warp]` section, `dream.py` uses the classic `zoom_rate` and `rotate_rate` motion exactly as
-  before, so older settings files and videos render the same. **Back to classic motion** removes the section.
+- An empty stack keeps the picture still: no motion at all.
+- Settings files from before the motion stack have no `[warp]` section. Their `zoom_rate` is read as a Zoom
+  module and their `rotate_rate` as a Spin module wobbling on a sine, so older settings and videos still move
+  the same way (minus the old warp's tiny drift). Recipes that set `zoom_rate` or `rotate_rate` now change the
+  stack's Zoom and Spin.
+
+### Video motion
+
+The **Video motion** module makes the dream move the way a clip you choose moves. Pick or drop a clip on its
+card (it is copied to `clips\`), then press **Extract motion**. The motion is worked out once and cached in
+`video_motion\`; a render extracts it itself if you skipped that.
+
+```ini
+video.clip = C:\...\clips\drive.mp4
+video.source = flow            ; flow: smooth optical flow (RAFT) / codec: the clip's own H.264/H.265 motion vectors
+video.loop = loop              ; loop, pingpong (plays back and forth) or hold (keeps the last frame's motion)
+video.gaps = hold              ; codec only: blocks without a past vector keep the previous motion, or zero
+video.amp = 1                  ; strength
+video.speed = 1                ; clip speed (2 plays it twice as fast, and so moves twice as fast)
+video.smooth = 0.3             ; blur of the motion field
+video.offset = 0               ; where in the clip to start, 0 to 1
+```
+
+- **Optical flow** follows everything that moves, smoothly. On this CPU-only PyTorch it takes about half a second
+  per clip frame (clips are cut at 30 s).
+- **Codec vectors** read the motion the encoder stored. They are blocky and glitchy, like datamoshing, and take
+  no time to extract. B-frames mostly point to the future and leave gaps; **hold** keeps the motion going there.
+- The clip is cropped to the video's shape the way start images are. Camera footage often moves much more per
+  frame than a zoom; if the Motion check warns, lower the strength.
+- The editor's preview can show the clip's own first frame (**Picture: Clip**) to check that the motion follows it.
 
 ## Credits
 

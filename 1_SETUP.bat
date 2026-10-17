@@ -20,7 +20,7 @@ if %errorlevel%==0 (
   echo No NVIDIA GPU found - installing CPU build. Rendering will be slow.
   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu || goto :fail
 )
-pip install numpy pillow imageio-ffmpeg open_clip_torch gdown || goto :fail
+pip install numpy pillow imageio-ffmpeg open_clip_torch gdown av || goto :fail
 echo Downloading the VGG16 network weights ^(about 500 MB, one time^) ...
 python -c "import torchvision; torchvision.models.vgg16(weights=torchvision.models.VGG16_Weights.IMAGENET1K_V1); print('weights OK')" || goto :fail
 python -c "import torch; print('CUDA available:', torch.cuda.is_available())"

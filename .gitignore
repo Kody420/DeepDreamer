@@ -16,6 +16,10 @@ preview_settings.ini
 # ---- Your own start images (copied in by the editor)
 init_images/
 
+# ---- Clips for the video motion module (copied in by the editor) and their extracted motion
+clips/
+video_motion/
+
 # ---- AttnGAN: downloaded and prepared by attngan/setup_files.py (~400 MB)
 attngan/downloads/
 attngan/last/

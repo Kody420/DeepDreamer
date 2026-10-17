@@ -288,9 +288,13 @@ details.log pre { font: 11px/1.4 var(--mono); background: #090b0e; border-radius
 <script src="/warp.js"></script>
 <script>
 const TOKEN = "__TOKEN__";
-const EDITOR_VERSION = 5;   // must match VERSION in server.py
+const EDITOR_VERSION = 6;   // must match VERSION in server.py
+// fetch, but when the editor isn't running any more say so, instead of the browser's "Failed to fetch"
+const net = (url, opts) => fetch(url, opts).catch(() => {
+  throw new Error("The editor isn't answering. Check that its window (4_EDITOR.bat) is still open, then reload this page.");
+});
 const api = async (path, body) => {
-  const r = await fetch(path, body === undefined ? { headers: { "X-Token": TOKEN } }
+  const r = await net(path, body === undefined ? { headers: { "X-Token": TOKEN } }
     : { method: "POST", headers: { "X-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || r.statusText);
@@ -474,7 +478,7 @@ function control(it, sec) {
       if (!/^image\//.test(f.type) && !/\.(jpe?g|png|bmp|webp|tiff?|gif)$/i.test(f.name)) { toast("That is not an image file."); return; }
       try {
         toast(`Copying ${f.name}…`);
-        const r = await fetch("/api/upload_image", { method: "POST", headers: { "X-Token": TOKEN, "X-Filename": encodeURIComponent(f.name) }, body: f });
+        const r = await net("/api/upload_image", { method: "POST", headers: { "X-Token": TOKEN, "X-Filename": encodeURIComponent(f.name) }, body: f });
         const j = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(j.error || r.statusText);
         set(it.k, j.path); toast(`Start image set (copied to init_images\\). Not saved yet.`);
@@ -597,7 +601,9 @@ const sameValue = (a, b) => {
   const na = String(a ?? "").split(",").map(x => x.trim()), nb = String(b ?? "").split(",").map(x => x.trim());
   return na.length === nb.length && na.every((x, i) => x === nb[i] || (x !== "" && nb[i] !== "" && +x === +nb[i]));
 };
-const recipeHolds = i => Object.entries(RECIPES[i][1]).every(([k, v]) => sameValue(cur.render[k], v));
+// recipes still name zoom_rate / rotate_rate; those now mean the stack's first Zoom and Spin (see warp.js)
+const MOTION_KEYS = new Set(["zoom_rate", "rotate_rate"]);
+const recipeHolds = i => Object.entries(RECIPES[i][1]).every(([k, v]) => sameValue(MOTION_KEYS.has(k) ? warp?.oldValue(k) : cur.render[k], v));
 function showRecipe() {
   let i = pickedRecipe !== null && recipeHolds(pickedRecipe) ? pickedRecipe : null;
   if (i === null) {
@@ -624,9 +630,8 @@ const BUSY = [[0.5, 0.1], [1.0, 0.3], [1.6, 0.6], [2.6, 0.8], [4, 0.9]];
 
 function readout() {
   const r = cur.render, num = k => +r[k];
-  const fps = num("fps") || 30, hue = num("hue_rate"), ws = warp ? warp.summary() : { classic: true };
-  let zoom = num("zoom_rate"), rot = num("rotate_rate");
-  if (!ws.classic) { zoom = Math.max(0, ws.zoom); rot = 0; }
+  const fps = num("fps") || 30, hue = num("hue_rate"), ws = warp ? warp.summary() : { names: [], zoom: 0 };
+  const zoom = Math.max(0, ws.zoom);   // the stack's Zoom modules set how long shapes last
   const sc = parseScales(r.scales) || [0.12, 0.2, 0.3];
   const bicubic = (r.resample || "bilinear") === "bicubic";
   const sharpenEff = num("sharpen") * fps / 30;
@@ -640,7 +645,6 @@ function readout() {
   if (zoom <= 0.001) lifeTxt = "no zoom: shapes stay and keep being repainted in place";
   else {
     life = zoom > 1.2 ? 0.7 / zoom : zoom < 0.05 ? null : interp(LIFE, zoom, true);
-    if (life && rot > 0.1) life *= 0.65;
     lifeTxt = life ? `<b>≈ ${life.toFixed(1)} s</b> per shape` : "<b>8 s+</b> per shape (near-still)";
   }
   // intro
@@ -661,7 +665,6 @@ function readout() {
   const minS = Math.min(...sc);
   const size = minS <= 0.08 ? "giant, frame-filling" : minS <= 0.15 ? "big" : minS <= 0.25 ? "medium to big" : "medium";
   const crowd = zoom >= 0.35 ? "one subject at a time" : zoom < 0.15 ? "a crowd of many" : "a few at once";
-  const swirl = rot > 0 ? `up to ${Math.round(40 * rot * 180 / Math.PI)}° and back every ~21 s` : "none";
   const cycle = hue > 0 ? `full cycle every ${(2 * Math.PI / hue).toFixed(0)} s` : "fixed palette";
   const frames = Math.round((num("seconds") || 0) * fps);
   const cost = (num("width") * num("height")) / (1920 * 1080) * (sc.reduce((a, s) => a + s * s, 0) * Math.max(1, num("steps") || 1) + 0.03) / (0.144 + 0.03) * frames / 720;
@@ -673,7 +676,7 @@ function readout() {
     <dt>Size</dt><dd>${size}, ${crowd}</dd>
     <dt>Picture</dt><dd><div class="meter"><span>calm</span><div class="track"><div class="knob" style="left:${(busy * 100).toFixed(0)}%"></div></div><span>busy</span></div>${busyWord}</dd>
     ${promptOn(r) ? `<dt>Prompt</dt><dd>${esc(r.prompt_mode || "clip")} at strength <b>${fmt(num("prompt_weight"))}</b></dd>` : ""}
-    ${ws.classic ? `<dt>Swirl</dt><dd>${swirl}</dd>` : `<dt>Motion</dt><dd>${esc(ws.names.join(" + ") || "none")} <span class="status">(Motion tab)</span></dd>`}
+    <dt>Motion</dt><dd>${esc(ws.names.join(" + ") || "none, a still picture")} <span class="status">(Motion tab)</span></dd>
     <dt>Colour</dt><dd>${cycle}</dd>
     <dt>Render</dt><dd>${frames} frames · about <b>${cost < 1.5 ? cost.toFixed(1) : Math.round(cost)}×</b> the work of a 24 s base test</dd>`;
 
@@ -681,8 +684,6 @@ function readout() {
   const add = (lvl, html) => W.push(`<div class="w ${lvl}">${html}</div>`);
   if (bicubic && fps >= 45) add("bad", "<b>bicubic at 60 fps</b> melts into zig-zag streaks / grey mush. Use bilinear.");
   else if (bicubic) add("warn", "<b>bicubic</b> sharpens every frame: expect a grainy, busy picture.");
-  if (rot > 0 && zoom > 0 && rot > zoom / 3) add("warn", `<b>Edge streaks likely:</b> swirl ${fmt(rot)} is more than a third of zoom ${fmt(zoom)}. Lower rotate_rate to ≤ ${fmt(zoom / 3, 3)}.`);
-  if (rot > 0 && zoom <= 0.001) add("warn", "<b>Edge streaks likely:</b> swirl without zoom pulls the edges in.");
   if (fine && eff < 2) add("warn", "<b>Fine scales at this strength stay soft</b> and stuck at glossy tubes. Raise strength to ~2.5 or add sharpen 0.1, or use smaller scales.");
   if (eff < 0.6) add("warn", "<b>Too weak:</b> at this strength / working contrast nothing recognisable may form.");
   if (!parseScales(r.scales)) add("bad", "<b>scales</b> must be numbers between 0 and 2, separated by commas.");
@@ -736,6 +737,7 @@ function setLive(kind) {   // while a job runs, show the frame dream.py is worki
 }
 
 function showJob(j) {
+  warp?.job(j);   // the Motion tab follows motion extractions
   const run = j.running;
   setLive(run ? j.kind : null);
   $("#btn-stop").disabled = !run; $("#btn-preview").disabled = run; $("#btn-render").disabled = run;
@@ -743,7 +745,7 @@ function showJob(j) {
   $("#bar").style.width = (run ? pct : j.code === 0 && j.kind ? 100 : pct) + "%";
   let text = "Idle", time = "";
   if (j.kind) {
-    const what = { preview: "Preview", render: "Render", attngan: "Text to image" }[j.kind] || j.kind;
+    const what = { preview: "Preview", render: "Render", attngan: "Text to image", motion: "Motion extraction" }[j.kind] || j.kind;
     const el = ((j.ended || Date.now() / 1000) - j.started);
     if (run) {
       text = `${what}: ${j.frames ? `frame ${j.frame} of ${j.frames}` : "starting…"}`;
@@ -759,6 +761,7 @@ function showJob(j) {
   if (!run && j.code === 0 && j.result && j.result !== lastResult && j.ended) {
     lastResult = j.result;
     if (j.kind === "attngan") { agShow(); }
+    else if (j.kind === "motion") { toast("Clip motion extracted"); }
     else if (j.kind === "preview") setPlayer(`/media/preview.mp4?t=${Date.now()}`, "Preview");
     else { setPlayer(`/media/${j.result}?t=${Date.now()}`, j.result.replace("output/", "")); toast(`Saved ${j.result}`); loadState(); }
   }
@@ -826,7 +829,7 @@ function renderGallery() {
   g.innerHTML = videos.map((v, i) => {
     const s = v.settings;
     const mo = v.warp && String(v.warp.stack || "").trim() ? `motion: ${esc(v.warp.stack)}<br>` : "";
-    const kv = s ? `${mo}${promptOn(s) ? `prompt (${esc(s.prompt_mode || "clip")} ${esc(s.prompt_weight || 0.85)}): “${esc(s.prompt)}”<br>` : ""}${s.model || "vgg16"} · zoom ${s.zoom_rate} · strength ${s.strength} · scales ${s.scales}<br>object_bias ${s.object_bias ?? 0} · hue ${s.hue_rate} · ${s.resample || "bicubic (old)"} · seed ${s.seed}<br>${s.width}×${s.height} · ${s.fps} fps · ${s.seconds} s` : "No settings file";
+    const kv = s ? `${mo}${promptOn(s) ? `prompt (${esc(s.prompt_mode || "clip")} ${esc(s.prompt_weight || 0.85)}): “${esc(s.prompt)}”<br>` : ""}${s.model || "vgg16"} · strength ${s.strength} · scales ${s.scales}<br>object_bias ${s.object_bias ?? 0} · hue ${s.hue_rate} · ${s.resample || "bicubic (old)"} · seed ${s.seed}<br>${s.width}×${s.height} · ${s.fps} fps · ${s.seconds} s` : "No settings file";
     return `<article class="card${lastResult && lastResult.endsWith(v.name) ? " new" : ""}">
       <video preload="metadata" controls muted loop playsinline src="/media/output/${encodeURIComponent(v.name)}#t=3"></video>
       <div class="body"><div class="title"><b>${v.num ?? "–"}</b><span class="status">${esc(v.name)} · ${(v.size / 1e6).toFixed(0)} MB</span></div>
@@ -841,7 +844,7 @@ $("#grid").addEventListener("click", e => {
   if (l) {
     const v = videos[+l.dataset.load];
     for (const [k, val] of Object.entries(v.settings)) cur.render[k] = val;
-    cur.warp = v.warp ? { ...v.warp } : {};   // no [warp] = classic zoom_rate / rotate_rate motion
+    cur.warp = { ...(v.warp || {}) };   // older videos come as the Zoom + Spin stack (server.py warp_from_old)
     if (!v.settings.resample) cur.render.resample = "bicubic";   // made before the setting existed
     if (!v.settings.model) cur.render.model = "vgg16";
     refresh(); selectTab(ctlTab); toast(`Loaded settings of video ${v.num ?? v.name} (not saved yet)`);
@@ -954,8 +957,8 @@ const rsel = $("#recipe");
 RECIPES.forEach(([name], i) => rsel.add(new Option(name, i)));
 rsel.onchange = () => {
   if (rsel.value === "") return;
-  for (const [k, v] of Object.entries(RECIPES[+rsel.value][1])) cur.render[k] = String(v);
-  warp?.applyClassic(RECIPES[+rsel.value][1].zoom_rate, RECIPES[+rsel.value][1].rotate_rate);
+  for (const [k, v] of Object.entries(RECIPES[+rsel.value][1])) if (!MOTION_KEYS.has(k)) cur.render[k] = String(v);
+  warp?.applyRecipe(RECIPES[+rsel.value][1].zoom_rate, RECIPES[+rsel.value][1].rotate_rate);
   pickedRecipe = +rsel.value; toast(`Applied "${RECIPES[pickedRecipe][0]}" (not saved yet)`); refresh();
 };
 document.addEventListener("keydown", e => { if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); if (changes().length) $("#btn-save").click(); } });
@@ -966,6 +969,15 @@ warp = WarpLab.mount({
   root: $("#warp"), side: $("#warp-side"), extra: document.querySelector('fieldset.group[data-tab="motion"]'),
   get: () => cur.warp, saved: () => saved.warp, set: d => { cur.warp = d; refresh(); }, render: () => cur.render, toast,
   player: $("#player"), live: $("#live"), imageUrl: p => `/api/image?token=${TOKEN}&path=${encodeURIComponent(p)}`,
+  token: TOKEN, clipUrl: p => `/api/clip?token=${TOKEN}&path=${encodeURIComponent(p)}`,
+  uploadClip: async f => {   // copied into the clips folder, like start images into init_images
+    const r = await net("/api/upload_clip", { method: "POST", headers: { "X-Token": TOKEN, "X-Filename": encodeURIComponent(f.name) }, body: f });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    return j.path;
+  },
+  runJob: async (kind, opts) => { await api("/api/run", { kind, ...opts }); lastResult = null; startPolling(); },
+  stopJob: () => api("/api/stop", {}).then(pollJob).catch(e => toast(e.message)),
 }) || WarpLab;
 selectTab(dreamTab);
 loadState(true).catch(e => { document.body.insertAdjacentHTML("afterbegin", `<div class="w bad" style="margin:12px">Could not reach the editor server: ${esc(e.message)}. Start it with 4_EDITOR.bat.</div>`); });

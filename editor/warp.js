@@ -19,7 +19,7 @@ const P = (k, label, min, max, step, def, unit = "") => ({ k, label, min, max, s
 const MODS = [
   { key: "zoom", name: "Zoom", fam: "Camera", pivot: true, blurb: "Fall into the picture. Tunnel bend makes the rim fall faster than the middle.",
     params: [P("rate", "Speed", -1.5, 1.5, .01, .2, "/s"), P("bend", "Tunnel bend", -1, 2, .01, 0)] },
-  { key: "spin", name: "Spin", fam: "Camera", pivot: true, blurb: "Roll the whole frame around the pivot. The classic swirl is this with a sine curve.",
+  { key: "spin", name: "Spin", fam: "Camera", pivot: true, blurb: "Roll the whole frame around the pivot. On a sine curve it wobbles back and forth.",
     params: [P("rate", "Turn", -1, 1, .005, .1, "rad/s")] },
   { key: "drift", name: "Drift", fam: "Camera", blurb: "Slide the picture sideways, like a camera pan.",
     params: [P("speed", "Speed", 0, 1, .01, .15, "/s"), P("angle", "Direction", -180, 180, 1, 90, "°")] },
@@ -43,25 +43,28 @@ const MODS = [
     params: [P("speed", "Speed", -1, 1, .01, .25, "/s"), P("angle", "Direction", -180, 180, 1, -90, "°"), P("streaks", "Streaks", 1, 60, 1, 12), P("vary", "Unevenness", 0, 1, .01, .7), P("wobble", "Change speed", 0, 2, .01, .3)] },
   { key: "edge", name: "Contour flow", fam: "Self-driven", blurb: "The picture moves itself: pixels slide along or across its own edges, so it reacts to what the dream draws.",
     params: [P("amp", "Strength", 0, 2, .01, .6), P("angle", "Across ↔ along", -180, 180, 1, 90, "°"), P("reach", "Edge width", .5, 6, .1, 2)] },
+  { key: "video", name: "Video motion", fam: "From a clip", blurb: "Moves the dream the way a chosen clip moves: its optical flow, or the codec's own motion vectors for a glitchier look.",
+    params: [P("amp", "Strength", 0, 3, .01, 1), P("speed", "Clip speed", .1, 4, .01, 1, "×"), P("smooth", "Smooth", 0, 1, .01, .3), P("offset", "Start in clip", 0, 1, .01, 0)] },
 ];
 MODS.forEach((m, i) => m.idx = i);
 const BY = Object.fromEntries(MODS.map(m => [m.key, m]));
-const FAMS = [["Camera", "moves the whole frame"], ["Bend", "warps parts of it"], ["Symmetry", ""], ["Flow", "moving fields"], ["Self-driven", "follows the picture"]];
+const FAMS = [["Camera", "moves the whole frame"], ["Bend", "warps parts of it"], ["Symmetry", ""], ["Flow", "moving fields"], ["Self-driven", "follows the picture"], ["From a clip", "moves like a video you choose"]];
 const EDGES = ["reflect", "wrap", "smear"];
 const SHAPES = { none: "Off", sine: "Sine", tri: "Triangle", saw: "Saw", pulse: "Pulse", noise: "Wander", ramp: "Ramp over video" };
 
 // ----------------------------------------------------------------------------- state
-let uid = 1, selId = 0, host = null, classic = true, lastSig = null, lookIdx = -1;
+let uid = 1, selId = 0, host = null, lastSig = null, lookIdx = -1;
 const MODDEF = { shape: "none", period: 8, depth: .5, phase: 0 };
 function M(key, vals = {}, mods = {}) {
   const d = BY[key], m = { id: uid++, key, on: true, solo: false, open: true, vals: {}, mod: {}, ui: {}, pivot: [0, 0], mask: { mode: 0, radius: .6, soft: .4 } };
   d.params.forEach(p => { m.vals[p.k] = vals[p.k] ?? p.def; m.mod[p.k] = { ...MODDEF, ...(mods[p.k] || {}) }; });
+  if (key === "video") Object.assign(m, { clip: "", source: "flow", loop: "loop", gaps: "hold" });   // the text settings of [warp]
   return m;
 }
 const S = { stack: [], prism: 0, edge: 0, fresh: .008, sharp: .12, T: 20, view: 0, gridWin: 1, gain: 0, autoGain: true, smode: 0 };
 
 const LOOKS = [
-  ["Classic zoom + wobble", () => [M("zoom", { rate: .2 }), M("spin", { rate: 0 }, { rate: { shape: "sine", period: 20.94, depth: .12 } })]],
+  ["Zoom + wobble", () => [M("zoom", { rate: .2 }), M("spin", { rate: 0 }, { rate: { shape: "sine", period: 20.94, depth: .12 } })]],
   ["Whirlpool", () => [M("zoom", { rate: .25 }), M("swirl", { rate: 1.2, size: .45, tail: .4 }), M("spin", { rate: -.1 })]],
   ["Melting wall", () => [M("zoom", { rate: .08 }), M("melt", { speed: .2, streaks: 12, vary: .4 }), M("flow", { amp: .1 })]],
   ["Ink in water", () => [M("flow", { amp: .3, scale: 1.2, speed: .25, detail: .4 }), M("zoom", { rate: .05 })]],
@@ -74,12 +77,6 @@ const LOOKS = [
   ["Handheld dive", () => [M("zoom", { rate: .25 }), M("shake", { amp: .015 }), M("tilt", { ty: 0 }, { ty: { shape: "sine", period: 12, depth: .2 } })]],
   ["Slow build", () => [M("zoom", { rate: .2 }), M("swirl", { rate: 0 }, { rate: { shape: "ramp", depth: .15 } }), M("melt", { speed: 0 }, { speed: { shape: "ramp", depth: .1 } })]],
 ];
-// zoom_rate and rotate_rate as a stack: dream.py's classic warp turns by 6 × rotate_rate × sin(0.3 t) rad/s
-function classicStack(zr, rr) {
-  const s = [M("zoom", { rate: clamp(zr, -1.5, 1.5) })];
-  if (rr > 0) s.push(M("spin", { rate: 0 }, { rate: { shape: "sine", period: 20.94, depth: +clamp(6 * rr, 0, 1).toFixed(3) } }));
-  return s;
-}
 
 function vnoise1(x) { const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f), h = n => fract(Math.sin(n * 127.1 + 11.3) * 43758.5453); return h(i) * (1 - u) + h(i + 1) * u; }
 function wave(md, t) {
@@ -109,6 +106,10 @@ function toDict() {
   S.stack.forEach((m, i) => {
     const n = names[i];
     if (!m.on) d[`${n}.on`] = "no";
+    if (m.key === "video") {
+      d[`${n}.clip`] = m.clip; d[`${n}.source`] = m.source; d[`${n}.loop`] = m.loop;
+      if (m.source === "codec") d[`${n}.gaps`] = m.gaps;
+    }
     for (const p of BY[m.key].params) {
       const md = m.mod[p.k];
       const curve = md.shape === "none" ? "" : md.shape === "ramp" ? ` ~ ramp(depth=${num(md.depth)})`
@@ -141,6 +142,11 @@ function fromDict(d) {
     const pv = String(d[`${name}.pivot`] || "").split(",").map(Number);
     if (pv.length === 2 && pv.every(isFinite)) m.pivot = pv;
     const w = String(d[`${name}.where`] || "").trim().split(/\s+/);
+    if (key === "video") {
+      m.clip = String(d[`${name}.clip`] || "").trim();
+      const pickv = (k, list, def) => { const v = String(d[`${name}.${k}`] || "").trim().toLowerCase(); return list.includes(v) ? v : def; };
+      m.source = pickv("source", ["flow", "codec"], "flow"); m.loop = pickv("loop", ["loop", "pingpong", "hold"], "loop"); m.gaps = pickv("gaps", ["zero", "hold"], "hold");
+    }
     if (w[0] === "near" || w[0] === "away") m.mask = { mode: w[0] === "near" ? 1 : 2, radius: +w[1] || .6, soft: isFinite(+w[3]) ? +w[3] : .4 };
     stack.push(m);
   }
@@ -148,9 +154,8 @@ function fromDict(d) {
 }
 // every edit ends here: the stack is written into cur.warp, which the editor counts as unsaved changes
 function commit() {
-  classic = false;
   const d = toDict(); lastSig = JSON.stringify(d);
-  host.set(d); showNote(); markChanged(); drawLanesNow = true;
+  host.set(d); markChanged(); drawLanesNow = true;
 }
 
 // ----------------------------------------------------------------------------- GLSL (same maths as warp_stack in dream.py)
@@ -162,6 +167,7 @@ const float DT = 1.0/30.0;
 uniform float u_t; uniform float u_aspect; uniform vec2 u_simres; uniform int u_edge;
 uniform int u_n; uniform int u_type[8]; uniform vec4 u_a[8]; uniform vec4 u_b[8]; uniform vec4 u_c[8];
 uniform sampler2D u_img;
+uniform sampler2D u_vf; uniform vec4 u_vdim;   // video motion: field strip (w, h, frames, clip aspect)
 mat2 rot(float a){ float c=cos(a), s=sin(a); return mat2(c,s,-s,c); }
 float h13(vec3 p){ p=fract(p*0.1031); p+=dot(p,p.zyx+31.32); return fract((p.x+p.y)*p.z); }
 float vn3(vec3 p){ vec3 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
@@ -171,6 +177,8 @@ float vn1(float x){ return vn3(vec3(x, 0.37, 0.71)); }
 vec2 toUV(vec2 p){ return p/vec2(u_aspect,1.0)*0.5+0.5; }
 vec2 fold(vec2 uv){ if(u_edge==0) return 1.0-abs(1.0-mod(uv,2.0)); if(u_edge==1) return fract(uv); return clamp(uv,0.0,1.0); }
 float luma(vec2 p){ return dot(textureLod(u_img, fold(toUV(p)), 0.0).rgb, vec3(.3,.59,.11)); }
+vec2 vfield(float k, vec2 uv, float lod){ float r=clamp(1.0-uv.y, 0.5/u_vdim.y, 1.0-0.5/u_vdim.y);
+  return textureLod(u_vf, vec2(clamp(uv.x,0.0,1.0), (k+r)/u_vdim.z), lod).xy; }
 float psi(vec2 p, vec4 a){ return vn3(vec3(p*a.y, u_t*a.z)) + a.w*0.5*vn3(vec3(p*a.y*2.3+7.1, u_t*a.z*1.7+3.3)); }
 vec2 stack(vec2 p){
   for(int i=0;i<8;i++){
@@ -204,6 +212,9 @@ vec2 stack(vec2 p){
     else if(ty==12){ float e=a.z*2.0/288.0;
       vec2 g=vec2(luma(p+vec2(e,0.0))-luma(p-vec2(e,0.0)), luma(p+vec2(0.0,e))-luma(p-vec2(0.0,e)))/(2.0*e);
       vec2 v=rot(radians(a.y))*g*a.x*DT*0.08; float L=length(v); if(L>0.03) v*=0.03/L; q = p + v; }
+    else if(ty==13){ float s=max(1.0, u_aspect/u_vdim.w); vec2 pc=p/s; vec2 uv=vec2(pc.x/u_vdim.w*0.5+0.5, pc.y*0.5+0.5);
+      float k0=floor(b.z); vec2 v=mix(vfield(k0,uv,a.y), vfield(b.w,uv,a.y), b.z-k0);
+      q = p + v*a.x*s*c.w; }
     float w=1.0;
     if(c.x>0.5){ float lo=c.y*(1.0-c.z), hi=c.y*(1.0+c.z)+1e-3; float inside=1.0-smoothstep(lo,hi,r); w = c.x<1.5 ? inside : 1.0-inside; }
     p = mix(p,q,w);
@@ -323,7 +334,7 @@ function compile(vs, fs) {
   const p = gl.createProgram(); gl.attachShader(p, mk(gl.VERTEX_SHADER, vs)); gl.attachShader(p, mk(gl.FRAGMENT_SHADER, fs)); gl.linkProgram(p);
   if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
   const cache = {}; const u = n => n in cache ? cache[n] : (cache[n] = gl.getUniformLocation(p, n));
-  gl.useProgram(p); gl.uniform1i(u("u_img"), 0); gl.uniform1i(u("u_S"), 1);
+  gl.useProgram(p); gl.uniform1i(u("u_img"), 0); gl.uniform1i(u("u_S"), 1); gl.uniform1i(u("u_vf"), 2);
   return { p, u };
 }
 function tex(w, h, ifmt, fmt, type, filter = gl.LINEAR) {
@@ -366,16 +377,27 @@ function makeTargets() {   // the sizes follow the render's aspect ratio
 }
 const TY = new Int32Array(8), UA = new Float32Array(32), UB = new Float32Array(32), UC = new Float32Array(32);
 function setStack(pr, t, list = active()) {
+  let vf = null;
   TY.fill(0); UA.fill(0); UB.fill(0); UC.fill(0);
   list.slice(0, MAXM).forEach((m, i) => {
     const d = BY[m.key], v = d.params.map(p => paramAt(m, p, t));
     TY[i] = d.idx; UA.set([v[0] || 0, v[1] || 0, v[2] || 0, v[3] || 0], i * 4);
     UB.set([m.pivot[0], m.pivot[1], v[4] || 0, v[5] || 0], i * 4); UC.set([m.mask.mode, m.mask.radius, m.mask.soft, 0], i * 4);
+    if (m.key === "video") {   // a.x = motion per preview frame (30 fps), a.y = blur level, b.z/b.w = clip frames, c.w = sign
+      const F = readyField(m);
+      if (!F) { UA.set([0, 0, 0, 0], i * 4); return; }
+      const [k0, k1, f, sg] = clipFrames(v[3] * F.n + t * F.fps * v[1], F.n, m.loop);
+      UA.set([v[0] * F.fps * v[1] / 30, Math.log2(1 + 3 * v[2]), 0, 0], i * 4);
+      UB.set([m.pivot[0], m.pivot[1], k0 + f, k1], i * 4); UC.set([m.mask.mode, m.mask.radius, m.mask.soft, sg], i * 4);
+      vf = F;
+    }
   });
+  if (vf) bindTex(2, vf.tex);
   const u = pr.u;
   gl.uniform1i(u("u_n"), Math.min(list.length, MAXM)); gl.uniform1iv(u("u_type"), TY);
   gl.uniform4fv(u("u_a"), UA); gl.uniform4fv(u("u_b"), UB); gl.uniform4fv(u("u_c"), UC);
   gl.uniform1f(u("u_t"), t); gl.uniform1f(u("u_aspect"), A); gl.uniform2f(u("u_simres"), SW, SH); gl.uniform1i(u("u_edge"), S.edge);
+  gl.uniform4f(u("u_vdim"), vf ? vf.w : 1, vf ? vf.h : 1, vf ? vf.n : 1, vf ? vf.aspect : A);
 }
 function bindTex(unit, t) { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, t); }
 function drawTo(tg) { gl.bindFramebuffer(gl.FRAMEBUFFER, tg ? tg.f : null); if (tg) gl.viewport(0, 0, tg.w, tg.h); gl.drawArrays(gl.TRIANGLES, 0, 3); }
@@ -453,22 +475,23 @@ function drawArrows(list, t, gain, gx, gy) {
 // Glyphs: each motion's one-frame flow at its default settings, drawn once into small 2D canvases.
 const glyphs = {};
 function renderGlyphs() {
+  for (const d of MODS) if (d.key !== "video") glyphs[d.key] = glyphFor(M(d.key));
+  glyphs.video = placeholderGlyph();
+}
+function glyphFor(m) {   // drawn in a corner of the preview canvas, then copied out before the next frame
   const w = 160, h = 90, keepA = A; A = 16 / 9;
   if (cv.width < w || cv.height < h) { cv.width = 320; cv.height = 180; }
-  for (const d of MODS) {
-    const m = M(d.key);
-    const st = floatOK ? readStats([m], 1.3) : null;
-    const gain = st ? clamp(.32 / Math.max(st.disp95, 1e-6), 1, 5000) : 40;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, w, h);
-    gl.enable(gl.SCISSOR_TEST); gl.scissor(0, 0, w, h); gl.clearColor(.106, .122, .161, 1); gl.clear(gl.COLOR_BUFFER_BIT); gl.disable(gl.SCISSOR_TEST);
-    drawArrows([m], 1.3, gain, 12, 7);
-    gl.viewport(1, 0, w, h); drawArrows([m], 1.3, gain, 12, 7);   // drawn twice, 1 px apart: WebGL lines are only 1 px wide
-    gl.viewport(0, 1, w, h); drawArrows([m], 1.3, gain, 12, 7);
-    const c = document.createElement("canvas"); c.width = w; c.height = h;
-    c.getContext("2d").drawImage(cv, 0, cv.height - h, w, h, 0, 0, w, h);
-    glyphs[d.key] = c;
-  }
+  const st = floatOK ? readStats([m], 1.3) : null;
+  const gain = st ? clamp(.32 / Math.max(st.disp95, 1e-6), 1, 5000) : 40;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, w, h);
+  gl.enable(gl.SCISSOR_TEST); gl.scissor(0, 0, w, h); gl.clearColor(.106, .122, .161, 1); gl.clear(gl.COLOR_BUFFER_BIT); gl.disable(gl.SCISSOR_TEST);
+  drawArrows([m], 1.3, gain, 12, 7);
+  gl.viewport(1, 0, w, h); drawArrows([m], 1.3, gain, 12, 7);   // drawn twice, 1 px apart: WebGL lines are only 1 px wide
+  gl.viewport(0, 1, w, h); drawArrows([m], 1.3, gain, 12, 7);
+  const c = document.createElement("canvas"); c.width = w; c.height = h;
+  c.getContext("2d").drawImage(cv, 0, cv.height - h, w, h, 0, 0, w, h);
   A = keepA;
+  return c;
 }
 function paintGlyph(canvas, key) { const g = glyphs[key]; if (!g) return; canvas.width = g.width; canvas.height = g.height; canvas.getContext("2d").drawImage(g, 0, 0); }
 
@@ -522,6 +545,14 @@ function setPic(name, quiet) {
     if (live && !live.hidden && live.naturalWidth) drawCover(live, live.naturalWidth, live.naturalHeight);
     else if (v && v.readyState >= 2 && v.videoWidth) drawCover(v, v.videoWidth, v.videoHeight);
     else { if (!quiet) host.toast("Nothing on the monitor yet. Run a preview, then try again."); return false; }
+  } else if (name === "clip") {   // the video module's clip, at its start point, to see its motion on its own footage
+    const m = S.stack.find(x => x.key === "video" && x.clip);
+    if (!m) { if (!quiet) host.toast("Choose a clip in a Video motion module first."); return false; }
+    const v = document.createElement("video"); v.muted = true; v.preload = "auto";
+    v.addEventListener("loadedmetadata", () => { v.currentTime = Math.max(.01, Math.min(v.duration - .05, m.vals.offset * v.duration)); }, { once: true });
+    v.addEventListener("seeked", () => { drawCover(v, v.videoWidth, v.videoHeight); uploadPic(); seek(frame); }, { once: true });
+    v.addEventListener("error", () => host.toast("The browser can't play this clip (H.265 or MOV often can't); its motion still works."), { once: true });
+    v.src = host.clipUrl(m.clip);
   } else if (name === "start") {
     const p = String(host.render().init_image || "").trim();
     if (!p) { host.toast("No start image is set (Editor tab, Start)."); return false; }
@@ -536,11 +567,122 @@ function setPic(name, quiet) {
   }
   picName = name;
   $$("[data-src]").forEach(c => c.setAttribute("aria-pressed", c.dataset.src === name));
-  if (name !== "start") { uploadPic(); seek(frame); }
+  if (name !== "start" && name !== "clip") { uploadPic(); seek(frame); }
   return true;
 }
 
 // ----------------------------------------------------------------------------- DOM
+// ----------------------------------------------------------------------------- video motion
+// The Video motion module moves the picture the way a chosen clip moves. video_motion.py (run by the server as a
+// job) stores one backward field per clip frame; the preview loads its 64 px copy into a texture strip (frames
+// stacked top to bottom, x/y in red/green) that shader type 13 samples, blending the two nearest clip frames.
+const fields = {};      // key -> { state: loading | ready | missing | error, n, h, w, fps, aspect, tex, msg }
+let job = null, jobKey = null, lastJobEnd = null;
+const fieldKey = m => `${m.clip}|${m.source}|${m.source === "codec" ? m.gaps : "hold"}`;
+function clipFrames(fi, n, loop) {   // same as clip_frames in dream.py: frames to blend, weight, motion sign
+  if (n < 2) return [0, 0, 0, 1];
+  if (loop === "hold") { fi = clamp(fi, 0, n - 1); const k = Math.floor(fi); return [k, Math.min(k + 1, n - 1), fi - k, 1]; }
+  if (loop === "pingpong") {
+    const per = 2 * (n - 1); let x = ((fi % per) + per) % per, sg = 1;
+    if (x > n - 1) { x = per - x; sg = -1; }
+    const k = Math.floor(x); return [k, Math.min(k + 1, n - 1), x - k, sg];
+  }
+  const x = ((fi % n) + n) % n, k = Math.floor(x); return [k, (k + 1) % n, x - k, 1];
+}
+async function loadField(m) {
+  if (!m.clip) return;
+  const key = fieldKey(m), cur0 = fields[key];
+  if (cur0 && (cur0.state === "ready" || cur0.state === "loading")) return;
+  fields[key] = { state: "loading" }; videoStatus();
+  try {
+    const q = new URLSearchParams({ clip: m.clip, source: m.source, gaps: m.gaps });
+    const r = await fetch(`/api/motion?${q}`, { headers: { "X-Token": host.token } });
+    if (r.status === 404) {
+      const j = await r.json().catch(() => ({}));
+      fields[key] = { state: j.missing ? "missing" : "error", msg: j.missing ? "" : (j.error === "clip not found" ? "The clip file is gone." : j.error) };
+    } else {
+      if (!r.ok) throw new Error(r.statusText);
+      const buf = await r.arrayBuffer(), hl = new DataView(buf).getUint32(0, true);
+      const head = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hl)));
+      fields[key] = gl ? fieldTexture(head, new Uint16Array(buf.slice(4 + hl))) : { state: "ready", ...head };
+      renderVideoGlyph(); resettle(0);
+    }
+  } catch (e) { fields[key] = { state: "error", msg: e instanceof TypeError ? "The editor isn't answering. Check that 4_EDITOR.bat is open, then reload the page." : e.message }; }
+  videoStatus();
+}
+function fieldTexture(hd, src) {   // (n, 2, h, w) float16 -> one RG16F texture, frames stacked; long clips skip frames
+  const step = Math.max(1, Math.ceil(hd.n * hd.h / gl.getParameter(gl.MAX_TEXTURE_SIZE))), n = Math.floor((hd.n - 1) / step) + 1;
+  const fr = hd.h * hd.w, data = new Uint16Array(n * fr * 2);
+  for (let k = 0; k < n; k++) {
+    const s0 = k * step * 2 * fr, d0 = k * fr * 2;
+    for (let i = 0; i < fr; i++) { data[d0 + i * 2] = src[s0 + i]; data[d0 + i * 2 + 1] = src[s0 + fr + i]; }
+  }
+  const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG16F, hd.w, hd.h * n, 0, gl.RG, gl.HALF_FLOAT, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  if (floatOK) { gl.generateMipmap(gl.TEXTURE_2D); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR); }   // smooth = blur by mip level
+  else gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  return { state: "ready", n, h: hd.h, w: hd.w, fps: hd.fps / step, aspect: hd.aspect, tex: t, frames: hd.n };
+}
+const readyField = m => { const F = m.key === "video" && m.clip && fields[fieldKey(m)]; return F && F.state === "ready" && F.tex ? F : null; };
+const optHtml = (cur, list) => list.map(([v, l]) => `<option value="${v}" ${v === cur ? "selected" : ""}>${l}</option>`).join("");
+function videoBlock(m) {
+  const name = m.clip ? m.clip.split(/[\\/]/).pop() : "";
+  return `<div class="wl-video" data-id="${m.id}">
+    <div class="wl-vrow"><button class="btn small" type="button" data-act="vpick">${m.clip ? "Change clip…" : "Choose clip…"}</button>
+      <span class="pv" title="${esc(m.clip)}">${m.clip ? esc(name) : "No clip yet: choose one or drop a video here"}</span><input type="file" accept="video/*" hidden data-vfile></div>
+    <div class="wl-vrow">
+      <label>Source <select data-vf="source">${optHtml(m.source, [["flow", "Optical flow"], ["codec", "Codec vectors"]])}</select></label>
+      <label>At the end <select data-vf="loop">${optHtml(m.loop, [["loop", "Loop"], ["pingpong", "Ping-pong"], ["hold", "Hold last motion"]])}</select></label>
+      <label ${m.source === "codec" ? "" : "hidden"} title="Blocks with no motion vector to the past: intra blocks, I-frames, future-only blocks">Gaps <select data-vf="gaps">${optHtml(m.gaps, [["hold", "Hold previous"], ["zero", "Zero"]])}</select></label>
+    </div>
+    <div class="wl-vstat" data-vstat="${m.id}"></div>
+    <p class="hint">${m.source === "codec" ? "Codec vectors: the clip's own block motion, blocky and glitchy like datamoshing." : "Optical flow: the smooth, true motion of everything in the clip."} Camera footage often moves far more per frame than a zoom; if the Motion check warns, lower the strength.</p>
+  </div>`;
+}
+function videoStatus() {
+  if (!root) return;
+  $$("[data-vstat]").forEach(el => {
+    const m = findMod(el.dataset.vstat); if (!m) return;
+    const key = fieldKey(m), F = fields[key], running = job && job.running && job.kind === "motion";
+    let h = "";
+    if (!m.clip) h = "";
+    else if (running && jobKey === key) h = `<span>Extracting motion… ${job.frames ? Math.round(job.frame / job.frames * 100) + "%" : "starting"}</span><button class="btn small" type="button" data-act="vstop">Stop</button>`;
+    else if (!F || F.state === "loading") h = "<span>Loading motion…</span>";
+    else if (F.state === "ready") h = `<span>Motion ready: ${F.frames ?? F.n} frames at ${+(F.fps * ((F.frames ?? F.n) > F.n ? (F.frames - 1) / (F.n - 1) : 1)).toFixed(2)} fps</span>`;
+    else if (F.state === "missing") h = `<span>Not extracted yet.${m.source === "flow" ? " Optical flow takes about half a second per frame on this computer." : ""}</span><button class="btn small primary" type="button" data-act="vextract" ${running ? "disabled" : ""}>Extract motion</button>`;
+    else h = `<span style="color:var(--bad)">${esc(F.msg || "Could not load the motion.")}</span><button class="btn small" type="button" data-act="vextract" ${running ? "disabled" : ""}>Try again</button>`;
+    if (job && !job.running && job.kind === "motion" && job.code && !job.stopped && jobKey === key)
+      h += `<span style="color:var(--bad)">Extraction failed: ${esc((job.log || []).slice(-1)[0] || "see the log")}</span>`;
+    el.innerHTML = h;
+  });
+}
+async function uploadClip(m, f) {
+  if (!f) return;
+  if (!/^video\//.test(f.type) && !/\.(mp4|m4v|mov|mkv|webm|avi)$/i.test(f.name)) { host.toast("That is not a video file."); return; }
+  try {
+    host.toast(`Copying ${f.name}…`);
+    m.clip = await host.uploadClip(f);
+    renderStack(); commit(); loadField(m); resettle(0);
+    host.toast("Clip set (copied to clips\\). Not saved yet.");
+    if (picName === "clip") setPic("clip", true);
+  } catch (e) { host.toast(e.message); }
+}
+function placeholderGlyph() {   // until a clip is chosen: a film strip
+  const c = document.createElement("canvas"); c.width = 160; c.height = 90; const x = c.getContext("2d");
+  x.fillStyle = "#1b1f29"; x.fillRect(0, 0, 160, 90);
+  x.strokeStyle = "#9399a8"; x.lineWidth = 3; x.strokeRect(34, 16, 92, 58);
+  x.fillStyle = "#9399a8"; for (let i = 0; i < 6; i++) { x.fillRect(40 + i * 14, 21, 7, 6); x.fillRect(40 + i * 14, 63, 7, 6); }
+  x.strokeStyle = "#3fc6bd"; x.lineWidth = 3; x.beginPath(); x.moveTo(52, 45); x.lineTo(108, 45); x.moveTo(98, 38); x.lineTo(108, 45); x.lineTo(98, 52); x.stroke();
+  return c;
+}
+function renderVideoGlyph() {   // once a clip's motion is loaded, the glyph shows its real flow
+  const m = S.stack.find(readyField);
+  glyphs.video = m && gl ? glyphFor(m) : placeholderGlyph();
+  $$('canvas[data-glyph="video"]').forEach(c => paintGlyph(c, "video"));
+}
+
 let root, side, $q, $$;
 const fmtv = (v, st) => (+v).toFixed(Math.min(4, decimals(st)));
 // The stack goes into the settings window (root); the preview goes into the editor's monitor (side), built from
@@ -548,7 +690,6 @@ const fmtv = (v, st) => (+v).toFixed(Math.min(4, decimals(st)));
 function buildDom(extra) {
   root.innerHTML = `<div class="wl">
     <div class="wl-head"><h3>Motion stack</h3><span class="sub">modules run top to bottom · select one, then drag its pivot on the preview</span></div>
-    <div class="wl-note" data-r="note"></div>
     <div class="wl-head"><span class="sub">Looks:</span><div class="chips" data-r="looks"></div><span class="sp"></span>
       <button class="btn small" type="button" data-r="reroll" title="Keep these modules, roll new settings and curves (Shift+R)">Re-roll settings</button>
       <button class="btn small primary" type="button" data-r="rnd" title="A new stack, kept inside the stress limits (R)">Random warp</button></div>
@@ -580,6 +721,7 @@ function buildDom(extra) {
     <div class="wl-lanes"><p data-r="lanes-empty">No motion curves yet. Press <b>∿</b> next to a setting to make it change over the video.</p><canvas data-r="lanes" hidden></canvas></div>
     <div class="wl-src"><span>Picture</span><div class="chips">
       <button class="chip" type="button" data-src="monitor" title="The frame from the Editor tab's monitor: a preview, render or live frame">Last video</button>
+      <button class="chip" type="button" data-src="clip" title="The Video motion module's clip, at its start point">Clip</button>
       <button class="chip" type="button" data-src="start" title="The start image from the Editor tab">Start image</button>
       <button class="chip" type="button" data-src="garden">Eye garden</button><button class="chip" type="button" data-src="face">Face</button><button class="chip" type="button" data-src="star">Siemens star</button></div></div>
     <div class="readout"><h2>Motion check</h2><dl class="facts" data-r="facts"></dl><div class="warnings" data-r="warnings"></div></div>
@@ -597,7 +739,7 @@ function buildDom(extra) {
     <div class="input">${input}</div><div class="help">${help}</div></div>`;
   const rows = row("edge", "Edges", `<div class="chips" data-r="edges" id="wl-edge">
       <button class="chip" type="button" data-edge="0">Reflect</button><button class="chip" type="button" data-edge="1">Wrap</button><button class="chip" type="button" data-edge="2">Smear</button></div>`,
-      "What fills the frame where the motion pulls in pixels from outside it. Reflect mirrors the picture (classic), wrap tiles it, smear stretches the border.")
+      "What fills the frame where the motion pulls in pixels from outside it. Reflect mirrors the picture, wrap tiles it, smear stretches the border.")
     + row("prism", "Prism split", `<input type="range" id="wl-prism-r" min="0" max="0.012" step="0.0005" data-g="prism" aria-label="Prism split"><input type="number" id="wl-prism" min="0" max="0.012" step="0.0005" data-g="prism">`,
       "Red and blue zoom slightly apart every frame, so edges leave rainbow trails. 0.002–0.004 is plenty.");
   if (extra) { extra.insertAdjacentHTML("beforeend", rows); $q("extra").appendChild(extra); }
@@ -638,6 +780,7 @@ function renderStack() {
         <button class="wl-tog" type="button" data-act="fold" aria-expanded="${m.open}" aria-label="${m.open ? "Collapse" : "Expand"}">${m.open ? "–" : "+"}</button>
       </div>
       <div class="wl-mb" ${m.open ? "" : "hidden"}>
+        ${m.key === "video" ? videoBlock(m) : ""}
         ${d.params.map(p => paramRow(m, p)).join("")}
         <div class="wl-where" data-id="${m.id}">
           ${showPivot ? `<span>Pivot <span class="pv">${m.pivot[0].toFixed(2)}, ${m.pivot[1].toFixed(2)}</span></span><button class="btn small" type="button" data-act="center">Centre</button>` : ""}
@@ -669,6 +812,13 @@ function onStackClick(e) {
   const i = S.stack.indexOf(m), act = b.dataset.act;
   if (act === "select") { if (e.target.closest("button")) return; selId = m.id; $q("stack").querySelectorAll(".wl-mod").forEach(c => c.classList.toggle("sel", +c.dataset.id === selId)); drawOverlay(); return; }
   e.stopPropagation();
+  if (act === "vpick") { card.querySelector("[data-vfile]").click(); return; }
+  if (act === "vextract") {
+    jobKey = fieldKey(m);
+    host.runJob("motion", { clip: m.clip, source: m.source, gaps: m.gaps }).then(() => { delete fields[jobKey]; videoStatus(); }).catch(err => host.toast(err.message));
+    return;
+  }
+  if (act === "vstop") { host.stopJob(); return; }
   if (act === "wave") { const k = b.closest(".wl-p").dataset.k; m.ui[k] = !m.ui[k]; const row = card.querySelector(`.wl-curve[data-k="${k}"]`); row.hidden = !m.ui[k]; b.setAttribute("aria-expanded", m.ui[k]); if (m.ui[k]) drawSpark(row); return; }
   if (act === "fold") { m.open = !m.open; renderStack(); return; }
   if (act === "solo") { m.solo = !m.solo; renderStack(); resettle(0); return; }   // preview only, not saved
@@ -682,7 +832,15 @@ function onStackClick(e) {
   lookIdx = -1; renderLooks(); renderStack(); commit(); resettle(0);
 }
 function onStackInput(e) {
-  const el = e.target, f = el.dataset.f; if (!f) return;
+  const el = e.target;
+  if (el.dataset.vf || el.matches("[data-vfile]")) {
+    const vm = findMod(el.closest("[data-id]").dataset.id); if (!vm) return;
+    if (el.matches("[data-vfile]")) { uploadClip(vm, el.files[0]); el.value = ""; return; }
+    vm[el.dataset.vf] = el.value;
+    renderStack(); commit(); loadField(vm); resettle(0);
+    return;
+  }
+  const f = el.dataset.f; if (!f) return;
   const holder = el.closest("[data-id]"), m = findMod(holder.dataset.id); if (!m) return;
   if (f === "val") {
     const row = el.closest(".wl-p"), p = BY[m.key].params.find(q => q.k === row.dataset.k), v = clamp(+el.value, p.min, p.max);
@@ -705,8 +863,9 @@ function onStackInput(e) {
 function renderCatalog() {
   const full = S.stack.length >= MAXM;
   $q("catalog").innerHTML = FAMS.map(([fam, sub]) => `<div class="wl-fam">${fam}${sub ? ` · <span style="text-transform:none;letter-spacing:0;font-weight:400">${sub}</span>` : ""}</div>
-    <div class="wl-cat">${MODS.filter(d => d.fam === fam).map(d => `<button class="wl-c" type="button" data-add="${d.key}" ${full ? "disabled" : ""} title="${full ? "The stack holds 8 modules at most" : "Add " + d.name}">
-      <canvas data-glyph="${d.key}" aria-hidden="true"></canvas><b>${d.name}</b><p>${d.blurb}</p></button>`).join("")}</div>`).join("");
+    <div class="wl-cat">${MODS.filter(d => d.fam === fam).map(d => { const off = full || (d.key === "video" && S.stack.some(x => x.key === "video"));
+      return `<button class="wl-c" type="button" data-add="${d.key}" ${off ? "disabled" : ""} title="${full ? "The stack holds 8 modules at most" : off ? "One Video motion module at a time" : "Add " + d.name}">
+      <canvas data-glyph="${d.key}" aria-hidden="true"></canvas><b>${d.name}</b><p>${d.blurb}</p></button>`; }).join("")}</div>`).join("");
   $q("catalog").querySelectorAll("canvas[data-glyph]").forEach(c => paintGlyph(c, c.dataset.glyph));
 }
 function renderLooks() { $q("looks").innerHTML = LOOKS.map(([n], i) => `<button class="chip" type="button" data-look="${i}" aria-pressed="${i === lookIdx}">${n}</button>`).join(""); }
@@ -728,12 +887,6 @@ function markChanged() {
   $$(".ctl[data-wk]").forEach(c => c.classList.toggle("changed", String(cw[c.dataset.wk] ?? "") !== String(sv[c.dataset.wk] ?? "")));
 }
 function afterStructure() { renderCatalog(); drawOverlay(); drawLanesNow = true; }
-function showNote() {
-  const n = $q("note");
-  n.innerHTML = classic
-    ? `<span><b>Classic motion</b> from <code>zoom_rate</code> and <code>rotate_rate</code>. Change anything here and it is saved as a motion stack instead.</span>`
-    : `<span>Saved as <code>[warp]</code> in settings.ini; zoom_rate and rotate_rate are not used while it exists.</span><button class="btn small" type="button" data-act="classic">Back to classic motion</button>`;
-}
 
 // ---- views
 function renderViewOpt() {
@@ -814,6 +967,10 @@ function renderReadout(st) {
   if (tw) add("bad", `<b>${(st.tears * 100).toFixed(0)}% of the frame tears.</b> The picture is cut and joined there, so seams show. Lower the module with the hardest edge.`);
   if (st.outside > .25) add(S.edge === 1 ? "" : "warn", S.edge === 1 ? `<b>${(st.outside * 100).toFixed(0)}% of the frame came from beyond the edge</b> in the last second, filled by tiling the picture.` : `<b>${(st.outside * 100).toFixed(0)}% of the frame came from beyond the edge</b> in the last second. ${S.edge === 2 ? "Smear" : "Reflect"} fills it with stretched copies of the border, so the dream has little to work with there. Wrap tiles real picture in instead.`);
   if (L.some(m => m.key === "kaleido")) add("", "<b>The kaleidoscope isn't counted above.</b> Its mirror seams always show; the numbers describe the motion underneath it.");
+  for (const m of L.filter(m => m.key === "video")) {
+    if (!m.clip) add("bad", "<b>Video motion has no clip.</b> It does nothing, and a render stops with an error until you choose one.");
+    else if (!readyField(m)) add("warn", "<b>The clip's motion isn't extracted yet.</b> Press Extract motion on its card; otherwise the render extracts it first, which takes a while.");
+  }
   if (L.some(m => m.key === "edge")) add("", "<b>Contour flow reacts to the picture.</b> Here it follows the preview picture; in a render it follows the dream.");
   if (S.stack.some(m => m.solo)) add("", "<b>Solo is on.</b> The preview plays only the soloed modules; the render uses every module that is on.");
   $q("warnings").innerHTML = w.join("");
@@ -872,7 +1029,7 @@ function rollStack() {
   return { stack, prism: Math.random() < .25 ? +R(.001, .004).toFixed(4) : 0, edge: wpick([[0, 75], [1, 15], [2, 10]]) };
 }
 function rerollStack() {
-  const stack = S.stack.map(o => Object.assign(rollModule(o.key), { on: o.on, solo: o.solo, open: o.open, mask: { ...o.mask } }));
+  const stack = S.stack.map(o => o.key === "video" ? o : Object.assign(rollModule(o.key), { on: o.on, solo: o.solo, open: o.open, mask: { ...o.mask } }));
   addCurves(stack); return { stack, prism: S.prism, edge: S.edge };
 }
 // How far past the limits the readout warns about; also roughly how much to scale the strengths to land inside
@@ -888,7 +1045,7 @@ function judge(list) {
   return { pen, k };
 }
 const STRENGTH = { zoom: ["rate"], drift: ["speed"], flow: ["amp"], melt: ["speed"], spin: ["rate"], tilt: ["tx", "ty", "shear"], shake: ["amp", "roll"],
-  swirl: ["rate"], bulge: ["k"], mobius: ["k"], ripple: ["amp"], edge: ["amp"], kaleido: [] };
+  swirl: ["rate"], bulge: ["k"], mobius: ["k"], ripple: ["amp"], edge: ["amp"], kaleido: [], video: ["amp"] };
 function tame(list, f) {
   for (const m of list) for (const k of STRENGTH[m.key]) {
     const p = BY[m.key].params.find(q => q.k === k);
@@ -942,9 +1099,16 @@ function loop(now) {
 function wire() {
   $q("stack").addEventListener("click", onStackClick);
   $q("stack").addEventListener("input", onStackInput);
-  $q("note").addEventListener("click", e => { if (e.target.closest('[data-act="classic"]')) { lastSig = null; host.set({}); } });
+  const dropTarget = e => e.target.closest?.(".wl-video");   // drop a clip on a Video motion card
+  $q("stack").addEventListener("dragover", e => { const v = dropTarget(e); if (v && [...e.dataTransfer.types].includes("Files")) { e.preventDefault(); v.classList.add("drop"); } });
+  $q("stack").addEventListener("dragleave", e => dropTarget(e)?.classList.remove("drop"));
+  $q("stack").addEventListener("drop", e => {
+    const v = dropTarget(e); if (!v) return;
+    e.preventDefault(); v.classList.remove("drop");
+    const m = findMod(v.dataset.id); if (m) uploadClip(m, e.dataTransfer.files[0]);
+  });
   $q("catalog").addEventListener("click", e => {
-    const b = e.target.closest("[data-add]"); if (!b || S.stack.length >= MAXM) return;
+    const b = e.target.closest("[data-add]"); if (!b || b.disabled || S.stack.length >= MAXM) return;
     const m = M(b.dataset.add); S.stack.push(m); selId = m.id; lookIdx = -1; renderLooks(); renderStack(); commit(); resettle(0);
     host.toast(`Added ${BY[m.key].name} (not saved yet)`);
   });
@@ -998,26 +1162,32 @@ function wire() {
 }
 
 // ----------------------------------------------------------------------------- public
-// Re-read cur.warp (or zoom_rate / rotate_rate while there is no stack). Does nothing if it is what this tab wrote.
+// Re-read cur.warp. Does nothing if it is what this tab wrote. An empty stack is a still picture.
 function sync() {
   if (!root) return;
   markChanged();   // also after a save, when the stack itself is unchanged
-  const d = host.get() || {}, r = host.render();
-  const isClassic = !String(d.stack || "").trim();
-  const sig = isClassic ? `classic|${r.zoom_rate}|${r.rotate_rate}` : JSON.stringify(d);
+  const d = host.get() || {}, sig = JSON.stringify(d);
   if (sig === lastSig) return;
-  lastSig = sig; classic = isClassic;
-  const old = S.stack;
-  if (classic) { S.stack = classicStack(+r.zoom_rate || 0, +r.rotate_rate || 0); S.edge = 0; S.prism = 0; }
-  else {
-    const p = fromDict(d); S.stack = p.stack; S.edge = p.edge; S.prism = p.prism;
-    if (p.unknown.length) host.toast(`Unknown motion modules ignored: ${p.unknown.join(", ")}`);
-  }
+  lastSig = sig;
+  const old = S.stack, p = fromDict(d);
+  S.stack = p.stack; S.edge = p.edge; S.prism = p.prism;
+  if (p.unknown.length) host.toast(`Unknown motion modules ignored: ${p.unknown.join(", ")}`);
   S.stack.forEach((m, i) => { const o = old[i]; if (o && o.key === m.key) { m.open = o.open; m.ui = o.ui; m.solo = o.solo; if (o.id === selId) selId = m.id; } });
   if (!S.stack.some(m => m.id === selId)) selId = pickSel();
   lookIdx = -1;
-  renderLooks(); renderStack(); renderGlobals(); showNote();
+  renderLooks(); renderStack(); renderGlobals();
+  S.stack.filter(m => m.key === "video").forEach(loadField);
   if (gl && cur) resettle(0);
+}
+// the editor passes every job update; a finished motion extraction makes its field load
+function onJob(j) {
+  job = j;
+  if (j.kind === "motion" && !j.running && j.ended && j.ended !== lastJobEnd) {
+    lastJobEnd = j.ended;
+    for (const k in fields) if (fields[k].state !== "ready") delete fields[k];
+    S.stack.filter(m => m.key === "video").forEach(loadField);
+  }
+  videoStatus();
 }
 function show(on) {
   visible = on;
@@ -1025,18 +1195,32 @@ function show(on) {
   started = true;   // first time the tab is opened: use the monitor's frame if there is one
   if (!setPic("monitor", true)) setPic("garden", true);
 }
-// recipes set zoom_rate / rotate_rate; with a stack they go to its first Zoom and Spin instead
-function applyClassic(zr, rr) {
-  if (classic || (zr === undefined && rr === undefined)) return;
-  const z = S.stack.find(m => m.key === "zoom"), s = S.stack.find(m => m.key === "spin");
-  if (zr !== undefined && z) z.vals.rate = clamp(+zr, -1.5, 1.5);
-  if (rr !== undefined && s) { if (s.mod.rate.shape === "sine") s.mod.rate.depth = clamp(6 * rr, 0, 1); else s.vals.rate = clamp(6 * rr, -1, 1); }
-  if (z || s) { renderStack(); commit(); resettle(0); }
+// The editor's recipes still speak in the old zoom_rate / rotate_rate: they set the stack's first Zoom (added at
+// the top if missing) and the wobble of its first Spin (a sine of depth 6 x rotate_rate, as in old files).
+function applyRecipe(zr, rr) {
+  if (zr === undefined && rr === undefined) return;
+  if (zr !== undefined) {
+    let z = S.stack.find(m => m.key === "zoom");
+    if (!z && S.stack.length < MAXM) { z = M("zoom"); S.stack.unshift(z); }
+    if (z) z.vals.rate = clamp(+zr, -1.5, 1.5);
+  }
+  if (rr !== undefined) {
+    let s = S.stack.find(m => m.key === "spin");
+    if (!s && +rr > 0 && S.stack.length < MAXM) { s = M("spin", { rate: 0 }, { rate: { shape: "sine", period: 20.944, depth: 0 } }); S.stack.splice(1, 0, s); }
+    if (s) { s.vals.rate = 0; s.mod.rate = { ...MODDEF, shape: "sine", period: 20.944, depth: +clamp(6 * rr, 0, 1).toFixed(4) }; }
+  }
+  lookIdx = -1; renderLooks(); renderStack(); commit(); resettle(0);
+}
+// what a recipe's zoom_rate / rotate_rate amounts to in the current stack, so the recipe box can tell it still holds
+function oldValue(k) {
+  if (k === "zoom_rate") return S.stack.find(m => m.key === "zoom")?.vals.rate ?? 0;
+  const s = S.stack.find(m => m.key === "spin");
+  return s && s.mod.rate.shape === "sine" && !s.vals.rate ? +(s.mod.rate.depth / 6).toFixed(4) : 0;
 }
 // for the editor's "What to expect": the stack's names and the zoom speed that sets how long shapes last
 function summary() {
   const on = S.stack.filter(m => m.on);
-  return { classic, names: on.map(m => BY[m.key].name), zoom: on.filter(m => m.key === "zoom").reduce((a, m) => a + m.vals.rate, 0) };
+  return { names: on.map(m => BY[m.key].name), zoom: on.filter(m => m.key === "zoom").reduce((a, m) => a + m.vals.rate, 0) };
 }
 function mount(opts) {
   host = opts; root = opts.root; side = opts.side;
@@ -1054,5 +1238,8 @@ function mount(opts) {
   if (!floatOK) $q("facts").innerHTML = `<dt>Check</dt><dd>Needs float textures, which this browser doesn't offer.</dd>`;
   sync();
 }
-return { mount, sync, show, applyClassic, summary, _debug: () => ({ S, readStats, judge, active, randomWarp, rollModule, rollStack, toDict, fromDict, get frame() { return frame; }, get visible() { return visible; } }) };
+return { mount, sync, show, applyRecipe, oldValue, summary, job: onJob, _debug: () => ({ S, readStats, judge, fields, probe: (list, t) => {   // one-frame offset at the frame centre (tests)
+    const tex = coordMap(list, t, 1), tg = tex === coordA.t ? coordA : coordB, b = new Float32Array(4), x = tg.w >> 1, y = tg.h >> 1;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, tg.f); gl.readPixels(x, y, 1, 1, gl.RGBA, gl.FLOAT, b); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return [b[0] - ((x + .5) / tg.w * 2 - 1) * A, b[1] - ((y + .5) / tg.h * 2 - 1)]; }, active, randomWarp, rollModule, rollStack, toDict, fromDict, get frame() { return frame; }, get visible() { return visible; } }) };
 })();

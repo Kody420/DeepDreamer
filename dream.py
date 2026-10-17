@@ -31,8 +31,8 @@ def load_cfg(preview):
     c["segment_seconds"] = float(base.get("segment_seconds", 30))
     c["steps"] = int(base.get("steps", 1))
     c["strength"] = float(base.get("strength", 2.2))           # gradient step size (per 1/30 s)
-    c["zoom_rate"] = float(base.get("zoom_rate", 0.40))        # zoom into the picture, per second
-    c["rotate_rate"] = float(base.get("rotate_rate", 0.05))    # radians per second wobble amplitude
+    c["zoom_rate"] = float(base.get("zoom_rate", 0.40))        # only read from files made before [warp]
+    c["rotate_rate"] = float(base.get("rotate_rate", 0.05))
     c["noise"] = float(base.get("noise", 0.02))
     c["target_mean"] = float(base.get("target_mean", 0.45))
     c["target_std"] = float(base.get("target_std", 0.20))
@@ -59,7 +59,7 @@ def load_cfg(preview):
     c["prompt_cuts"] = int(base.get("prompt_cuts", 8))                  # random crops the prompt network looks at
     c["fade_seconds"] = float(base.get("fade_seconds", 1.5))
     c["encoder_args"] = base.get("encoder_args", "-c:v libx264 -preset fast -crf 14 -pix_fmt yuv420p").split()
-    c["warp"] = parse_warp(cp["warp"]) if cp.has_section("warp") else None   # None = the classic zoom_rate/rotate_rate warp
+    c["warp"] = parse_warp(cp["warp"] if cp.has_section("warp") else warp_from_old(c))   # the motion stack
     return c
 
 
@@ -182,16 +182,6 @@ def make_seed(h, w, dev, seed, init_image):
     return out.to(dev)
 
 
-def warp(img, zoom, ang, dx, dy, mode="bilinear"):
-    """zoom>1 zooms IN. dx, dy in normalised units.
-    bicubic overshoots slightly; repeated every frame (esp. at 60 fps) that builds up into zig-zag streaks."""
-    c, s = math.cos(ang) / zoom, math.sin(ang) / zoom
-    h, w = img.shape[-2:]
-    a = h / w
-    theta = torch.tensor([[c, -s * a, dx], [s / a, c, dy]], dtype=img.dtype, device=img.device)[None]
-    grid = F.affine_grid(theta, img.shape, align_corners=False)
-    return F.grid_sample(img, grid, mode=mode, padding_mode="reflection", align_corners=False)
-
 
 # ----------------------------------------------------------------------------- warp stack
 # The [warp] section of settings.ini: motion modules applied top to bottom. Each one only moves the sampling
@@ -212,18 +202,29 @@ WARP_PARAMS = {   # kind: [(param, min, max, default)], in the order the editor 
     "flow": [("amp", 0, 2, .4), ("scale", .3, 8, 1.6), ("speed", 0, 1.5, .2), ("detail", 0, 1, .35)],
     "melt": [("speed", -1, 1, .25), ("angle", -180, 180, -90), ("streaks", 1, 60, 12), ("vary", 0, 1, .7), ("wobble", 0, 2, .3)],
     "edge": [("amp", 0, 2, .6), ("angle", -180, 180, 90), ("reach", .5, 6, 2)],
+    # moves like a chosen clip (video_motion.py); also has the text keys clip, source, loop and gaps
+    "video": [("amp", 0, 3, 1), ("speed", .1, 4, 1), ("smooth", 0, 1, .3), ("offset", 0, 1, 0)],
 }
+VIDEO_LOOPS = ("loop", "pingpong", "hold")
 WARP_CURVES = ("sine", "tri", "saw", "pulse", "noise", "ramp")
 WARP_EDGES = ("reflect", "wrap", "smear")
 
 
+def warp_from_old(c):
+    """Settings files from before the motion stack have no [warp]: their zoom_rate becomes a Zoom module and their
+    rotate_rate wobble a Spin module following a sine (the old warp turned by 6 x rotate_rate x sin(0.3 t) rad/s).
+    editor/server.py does the same, so old files open in the editor as this stack."""
+    sec = {"stack": "zoom, spin" if c["rotate_rate"] > 0 else "zoom", "zoom.rate": str(c["zoom_rate"])}
+    if c["rotate_rate"] > 0:
+        sec["spin.rate"] = f"0 ~ sine(period=20.944, depth={min(1.0, 6 * c['rotate_rate']):.4g})"
+    return sec
+
+
 def parse_warp(sec):
-    """[warp] section -> dict(stack, edge, prism), or None when its stack is empty (then the classic warp is used).
+    """[warp] section -> dict(stack, edge, prism). An empty stack keeps the picture still.
     A value is a number, optionally followed by a motion curve:  swirl.rate = 1.2 ~ sine(period=12, depth=0.5)"""
     bad = lambda msg: sys.exit(f"settings.ini [warp]: {msg}")
     names = [n.strip().lower() for n in sec.get("stack", "").split(",") if n.strip()]
-    if not names:
-        return None
     edge = sec.get("edge", "reflect").strip().lower()
     if edge not in WARP_EDGES:
         bad(f"edge must be one of {', '.join(WARP_EDGES)}, not '{edge}'")
@@ -257,8 +258,57 @@ def parse_warp(sec):
         mode = {"near": 1, "away": 2}.get(where[0], 0) if where else 0
         radius = float(where[1]) if len(where) > 1 else .6
         soft = float(where[3]) if len(where) > 3 else .4
-        stack.append(dict(kind=kind, params=params, pivot=pivot[:2] + [0.0] * (2 - len(pivot)), where=(mode, radius, soft)))
+        m = dict(kind=kind, params=params, pivot=pivot[:2] + [0.0] * (2 - len(pivot)), where=(mode, radius, soft))
+        if kind == "video":
+            m["video"] = load_video_motion(sec, name, bad)
+        stack.append(m)
     return dict(stack=stack, edge=edge, prism=float(sec.get("prism", "0")))
+
+
+def load_video_motion(sec, name, bad):
+    """The text keys of a video module, and its clip's motion fields (extracted now if not cached yet)."""
+    clip = sec.get(f"{name}.clip", "").strip().strip('"')
+    if not clip:
+        bad(f"{name}.clip is empty: pick a clip in the editor's Motion tab")
+    if not os.path.isabs(clip):
+        clip = os.path.join(HERE, clip)
+    if not os.path.isfile(clip):
+        bad(f"{name}.clip not found: {clip}")
+    source = sec.get(f"{name}.source", "flow").strip().lower()
+    loop = sec.get(f"{name}.loop", "loop").strip().lower()
+    gaps = sec.get(f"{name}.gaps", "hold").strip().lower()
+    if source not in ("flow", "codec"):
+        bad(f"{name}.source must be flow or codec, not '{source}'")
+    if loop not in VIDEO_LOOPS:
+        bad(f"{name}.loop must be one of {', '.join(VIDEO_LOOPS)}, not '{loop}'")
+    if gaps not in ("zero", "hold"):
+        bad(f"{name}.gaps must be zero or hold, not '{gaps}'")
+    import video_motion
+    try:
+        v = video_motion.load(clip, source, gaps)
+    except ImportError as e:
+        bad(f"{e}. Run 1_SETUP.bat again to install what the {source} source needs.")
+    v.update(loop=loop, field_t=torch.from_numpy(v.pop("field")).half())   # moved to the GPU on first use
+    return v
+
+
+def clip_frames(fi, n, loop):
+    """Clip position fi (in frames) -> the two frames to blend, the blend weight, and the motion's sign
+    (playing backwards reverses the motion)."""
+    if n < 2:
+        return 0, 0, 0.0, 1.0
+    if loop == "hold":
+        fi = min(max(fi, 0.0), n - 1.0)
+        k0 = int(math.floor(fi)); return k0, min(k0 + 1, n - 1), fi - k0, 1.0
+    if loop == "pingpong":
+        period = 2 * (n - 1)
+        x = fi % period
+        sign = 1.0
+        if x > n - 1:
+            x, sign = period - x, -1.0
+        k0 = int(math.floor(x)); return k0, min(k0 + 1, n - 1), x - k0, sign
+    x = fi % n
+    k0 = int(math.floor(x)); return k0, (k0 + 1) % n, x - k0, 1.0
 
 
 def _frac(x):
@@ -335,6 +385,8 @@ def _sample(img, x, y, edge, mode):
 
 def warp_stack(img, t, warp_cfg, dt, total, mode="bilinear"):
     """One frame of the [warp] stack: move the sampling grid through every module, then resample once."""
+    if not warp_cfg["stack"] and warp_cfg["prism"] <= 0:
+        return img   # an empty stack: no motion, so no resampling (and no blur) either
     h, w = img.shape[-2:]
     a = w / h
     dev = img.device
@@ -411,6 +463,24 @@ def warp_stack(img, t, warp_cfg, dt, total, mode="bilinear"):
             vx, vy = vx * v[0] * dt * .08, vy * v[0] * dt * .08
             n = torch.sqrt(vx * vx + vy * vy); f = torch.clamp(.03 * k30 / (n + 1e-12), max=1)
             qx, qy = x + vx * f, y + vy * f
+        elif kind == "video":   # the clip's own motion: a backward field per clip frame, added to the coordinates
+            V = m["video"]
+            if V["field_t"].device != dev:
+                V["field_t"] = V["field_t"].to(dev)
+            fld = V["field_t"]
+            n = fld.shape[0]
+            k0, k1, f, sign = clip_frames(v[3] * n + t * V["fps"] * v[1], n, V["loop"])
+            fv = torch.lerp(fld[k0].float(), fld[k1].float(), f)[None]
+            ks = 1 + 2 * int(round(v[2] * 6))          # smooth: box blur of the field
+            if ks > 1:
+                fv = F.avg_pool2d(fv, ks, stride=1, padding=ks // 2, count_include_pad=False)
+            # cover-crop the clip onto the frame like start images; s > 1 when the clip is taller than the frame
+            s = max(1.0, a / V["aspect"])
+            grid = torch.stack([x / s / V["aspect"], -y / s], -1)[None]
+            d = F.grid_sample(fv, grid, mode="bilinear", padding_mode="border", align_corners=False)[0]
+            # one dream frame plays fps*speed*dt clip frames; amp scales on top
+            k = V["fps"] * v[1] * dt * v[0] * sign * s
+            qx, qy = x + d[0] * k, y + d[1] * k
         wmode, radius, soft = m["where"]
         if wmode:   # limit the module to a ring around its pivot (near) or to everything outside it (away)
             lo, hi = radius * (1 - soft), radius * (1 + soft) + 1e-3
@@ -469,7 +539,6 @@ class Dreamer:
         fps = c["fps"]
         self.model = build_model(dev, c["model"])
         self.lr = c["strength"] / 255.0 * (30.0 / fps)       # step in 0..1 units, scaled for fps
-        self.zoom = math.exp(c["zoom_rate"] / fps)
         self.hue = hue_matrix(c["hue_rate"] / fps, dev)
         self.noise = c["noise"] * math.sqrt(30.0 / fps)
         self.guide = None
@@ -483,14 +552,7 @@ class Dreamer:
         rec = (lambda k, v: trace.__setitem__(k, v.detach().clone())) if trace is not None else (lambda k, v: None)
         rec("previous", img)
         t = f / fps
-        if c["warp"] is not None:      # the motion stack from [warp]
-            ang = 0.0
-            img = warp_stack(img, t, c["warp"], 1.0 / fps, c["seconds"], c["resample"])
-        else:                          # classic: zoom_rate plus the rotate_rate wobble
-            ang = c["rotate_rate"] * math.sin(t * 0.3) / fps * 6
-            dx, dy = 0.01 * math.sin(t * 0.7) / fps * 6, 0.01 * math.cos(t * 0.5) / fps * 6
-            img = warp(img, self.zoom, ang, dx, dy, c["resample"])
-        rec("warp", img)
+        img = warp_stack(img, t, c["warp"], 1.0 / fps, c["seconds"], c["resample"]); rec("warp", img)
         img = sharpen(img, c["sharpen"] / 2); rec("sharpen", img)
         img = img + self.noise * torch.randn_like(img); rec("noise", img)
         img = torch.einsum("ij,bjhw->bihw", self.hue, img).clamp(0, 1); rec("hue", img)
@@ -508,7 +570,7 @@ class Dreamer:
             img = (img + self.lr * g).clamp(0, 1).detach()
         if trace is not None:
             trace["after"] = img.detach().clone(); trace["layer_weights"] = [float(x) for x in lw]
-            trace["angle"] = ang; trace["t"] = t
+            trace["t"] = t
         return img
 
 
@@ -566,8 +628,7 @@ def main():
     os.makedirs(work, exist_ok=True)
     dreamer = Dreamer(c, dev)          # builds the network before seeding, as before
     print("Model:", c["model"])
-    if c["warp"] is not None:
-        print("Motion:", " + ".join(m["kind"] for m in c["warp"]["stack"]) or "none (empty stack)")
+    print("Motion:", " + ".join(m["kind"] for m in c["warp"]["stack"]) or "none (still picture)")
     if dreamer.guide is not None:
         print(f"Prompt ({c['prompt_weight']:g}):", dreamer.guide.description)
     live = os.path.join(work, "live.jpg")    # latest frame, for the editor's live view
