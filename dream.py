@@ -468,8 +468,9 @@ def _vnoise1(x):   # smooth random wander for the "noise" motion curve
     return h(i) * (1 - u) + h(i + 1) * u
 
 
-def curve_value(p, t, total):
-    """A parameter's value at time t: base plus its motion curve, clamped to the parameter's range."""
+def curve_value(p, t, total, wrap=False):
+    """A parameter's value at time t: base plus its motion curve, clamped to the parameter's range
+    (wrapped around it instead for angles, so a turning line keeps turning)."""
     v, lo, hi, cv = p
     if cv:
         x = t / cv["period"] + cv["phase"]
@@ -482,6 +483,8 @@ def curve_value(p, t, total):
                  "saw": lambda: 2 * _frac(x) - 1, "pulse": lambda: math.tanh(4 * math.sin(2 * math.pi * x)) / math.tanh(4),
                  "noise": lambda: 2 * _vnoise1(x * 2 + cv["phase"] * 17) - 1}[s]()
             v += cv["depth"] * (hi - lo) / 2 * w
+    if wrap:
+        return lo + (v - lo) % (hi - lo)
     return min(hi, max(lo, v))
 
 

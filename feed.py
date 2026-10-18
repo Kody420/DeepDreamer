@@ -15,7 +15,8 @@ Every frame the motion stack moves the picture, then each feed module adds somet
 
 Amounts are per frame at 30 fps and scaled for other frame rates, so 30 and 60 fps get the same feed.
 Additive modules (grain, colour, marble, turing) add a field with standard deviation 1 times the amount; their
-"where" mask keeps the same total amount and concentrates it. Values take motion curves like [warp].
+"where" mask keeps the same total amount and concentrates it. Values take motion curves like [warp], except the
+ones read once for the whole video: colour.size and turing.size (they size a grid) and every (it schedules events).
 
 The picture is y up, height -1..1, width -w/h..w/h, as in the motion stack.
 Keep FEED_PARAMS and FEED_TEXT in step with editor/feed.js.
@@ -31,10 +32,11 @@ FEED_PARAMS = {   # kind: [(param, min, max, default)], in the order the editor 
     "marble": [("amount", 0, .05, .006), ("scale", .3, 8, 1.6), ("speed", 0, 1.5, .15), ("fold", 0, 3, 1.5)],
     "turing": [("amount", 0, .05, .005), ("size", .01, .15, .04), ("speed", 0, 4, 1)],
     "seeds": [("rate", 0, 20, 3), ("size", .01, .25, .05), ("strength", 0, 1, .35), ("life", .1, 3, .6)],
-    "mirror": [("amount", 0, 1, .15), ("angle", -180, 180, 90)],
+    "mirror": [("amount", 0, 1, .5), ("angle", -180, 180, 90)],
     "reseed": [("every", .5, 60, 8), ("size", .05, 1.5, .3), ("amount", 0, 1, .7), ("fade", 0, 3, .5)],
     "pictures": [("every", .5, 60, 6), ("size", .05, 1.5, .4), ("amount", 0, 1, .3), ("fade", 0, 3, 1)],
 }
+WRAP = {("mirror", "angle")}   # angles wrap around instead of stopping at the end of their range
 FEED_TEXT = {   # text keys: allowed values, the first is the default; a single value = free text with that default
     "grain": {"grid": ("matched", "pixel", "size"), "lock": ("screen", "world")},
     "colour": {"lock": ("screen", "world")},
@@ -96,7 +98,8 @@ class Feed:
         return rows, max(2, int(round(rows * self.a)))
 
     def _vals(self, m, t):
-        return [self.ops.curve(p, t, self.c["seconds"]) for p in m["params"]]
+        names = [k for k, *_ in FEED_PARAMS[m["kind"]]]
+        return [self.ops.curve(p, t, self.c["seconds"], (m["kind"], k) in WRAP) for p, k in zip(m["params"], names)]
 
     def _mask(self, m, activity, unit):
         """The module's where-mask (None = everywhere). unit=True rescales it to the same total amount."""
@@ -180,7 +183,7 @@ class Feed:
         rows, cols = self._grid(self.h / 4)
         y = torch.linspace(1, -1, rows, device=self.dev).view(-1, 1).expand(rows, cols) * scale
         x = torch.linspace(-self.a, self.a, cols, device=self.dev).view(1, -1).expand(rows, cols) * scale
-        tt = t * speed
+        st["phase"] = tt = st.get("phase", 0.0) + speed * self.dt   # integrated, so a curve on speed doesn't jump
 
         def fbm(px, py, z):
             s, a = 0, .5
