@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepDreamer - setting up</title>
+<style>
+  :root { --bg:#111218; --card:#1a1c26; --fg:#e8e9f0; --mute:#9094a8; --line:#2c2f3e; --acc:#8b7bff; --ok:#4cc38a; --bad:#ff6b6b; --warn:#f2b84b; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f4f4f8; --card:#fff; --fg:#1b1d28; --mute:#6a6e82; --line:#dcdde8; --acc:#5b49e0; --ok:#1f9d63; --bad:#d63b3b; --warn:#b7791f; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui,"Segoe UI",sans-serif; display:flex; justify-content:center; padding:48px 16px; }
+  main { width:100%; max-width:640px; }
+  h1 { font-size:26px; margin:0 0 4px; }
+  p { margin:0 0 16px; color:var(--mute); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin-bottom:16px; }
+  ol { list-style:none; margin:0; padding:0; }
+  li { display:flex; gap:12px; align-items:center; padding:6px 0; color:var(--mute); }
+  li .dot { width:22px; height:22px; border-radius:50%; border:2px solid var(--line); flex:none; display:grid; place-items:center; font-size:13px; }
+  li.done { color:var(--fg); } li.done .dot { background:var(--ok); border-color:var(--ok); color:#fff; }
+  li.now { color:var(--fg); font-weight:600; } li.now .dot { border-color:var(--acc); border-top-color:transparent; animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .note { border-left:4px solid var(--warn); padding:10px 14px; margin-bottom:16px; background:var(--card); border-radius:0 8px 8px 0; }
+  .err { border-color:var(--bad); }
+  .err b { color:var(--bad); }
+  pre { margin:10px 0 0; max-height:260px; overflow:auto; background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:10px; font:12px/1.45 Consolas,monospace; white-space:pre-wrap; word-break:break-all; }
+  button { background:var(--acc); color:#fff; border:0; border-radius:8px; padding:9px 18px; font:inherit; cursor:pointer; }
+  small { color:var(--mute); }
+  summary { cursor:pointer; color:var(--mute); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Setting up DeepDreamer</h1>
+  <p id="lead">One-time installation. This page keeps going on its own; you can leave it open and come back.</p>
+  <div id="warn" class="note" hidden></div>
+  <div class="card">
+    <ol id="steps"></ol>
+    <p style="margin:14px 0 0"><small id="timing"></small></p>
+  </div>
+  <div id="error" class="card err" hidden>
+    <b>Something went wrong.</b>
+    <pre id="errtext" style="max-height:140px"></pre>
+    <p style="margin:12px 0 0"><button id="retry">Try again</button></p>
+  </div>
+  <details class="card" id="detail"><summary>Details (what is being installed)</summary><pre id="log"></pre></details>
+</main>
+<script>
+const TOKEN = "__TOKEN__";
+const t0 = Date.now();
+const $ = id => document.getElementById(id);
+let lastStatus = "";
+async function tick() {
+  let s;
+  try { s = await (await fetch("/api/setup", { cache: "no-store" })).json(); }
+  catch (e) { $("timing").textContent = "Lost contact with DeepDreamer - is its window still open?"; return; }
+  if (s.status === "ready") { $("lead").textContent = "Installed. Opening the editor ..."; location.reload(); return; }
+  const checking = s.status === "checking";
+  $("lead").textContent = checking ? "Checking what is installed ..." :
+    s.status === "error" ? "The installation stopped." :
+    "One-time installation (about 3 GB of downloads, usually 5 to 20 minutes). You can leave this page open and come back.";
+  $("steps").innerHTML = s.steps.map((name, i) => {
+    const cls = checking ? (i === 0 ? "now" : "") : (i < s.step ? "done" : i === s.step && s.status === "installing" ? "now" : "");
+    return `<li class="${cls}"><span class="dot">${cls === "done" ? "&#10003;" : ""}</span>${name}</li>`;
+  }).join("");
+  $("warn").hidden = !s.warning;
+  $("warn").textContent = s.warning || "";
+  $("error").hidden = s.status !== "error";
+  $("errtext").textContent = s.error || "";
+  if (s.status === "installing") $("timing").textContent = "Running for " + Math.floor((Date.now() - t0) / 60000) + " min " + Math.floor((Date.now() - t0) / 1000) % 60 + " s - Python " + s.python;
+  else $("timing").textContent = "";
+  const log = $("log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+  log.textContent = s.log.join("\n");
+  if (atEnd) log.scrollTop = log.scrollHeight;
+  if (s.status === "error" && lastStatus !== "error") $("detail").open = true;
+  lastStatus = s.status;
+}
+$("retry").onclick = async () => {
+  await fetch("/api/setup/retry", { method: "POST", headers: { "X-Token": TOKEN } });
+  tick();
+};
+tick(); setInterval(tick, 1500);
+</script>
+</body>
+</html>
