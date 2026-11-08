@@ -223,7 +223,7 @@ details.log pre { font: 11px/1.4 var(--mono); background: #090b0e; border-radius
     <div class="viewer">
       <div class="screen"><video id="player" controls loop muted playsinline></video>
         <img id="live" alt="The frame being dreamed right now" hidden><span class="live-badge" id="live-badge" hidden>LIVE</span>
-        <button class="btn small enlarge" id="btn-enlarge" type="button" title="Enlarge (Esc to close)" aria-label="Enlarge the viewer">⤢ Enlarge</button></div>
+        <button class="btn small enlarge" id="btn-enlarge" type="button" title="Enlarge (Esc to close)" hidden aria-label="Enlarge the viewer">⤢ Enlarge</button></div>
       <div class="vbar"><span id="playing">Nothing loaded yet. Run a preview.</span><span class="spacer"></span>
         <button class="btn small" id="show-preview">Preview</button><button class="btn small" id="show-latest">Latest render</button></div>
     </div>
@@ -722,7 +722,8 @@ function setLive(kind) {   // while a job runs, show the frame dream.py is worki
   const img = $("#live"), badge = $("#live-badge");
   if (kind === liveKind) return;
   liveKind = kind; clearInterval(liveTimer);
-  if (!kind) { img.hidden = true; badge.hidden = true; return; }
+  $("#btn-enlarge").hidden = !kind;   // the enlarged view is only for watching a render
+  if (!kind) { toggleBig(false); img.hidden = true; badge.hidden = true; return; }
   const tick = async () => {
     try {
       const m = await fetch(`/media/live/${kind}.json?t=${Date.now()}`).then(r => r.ok ? r.json() : null);
