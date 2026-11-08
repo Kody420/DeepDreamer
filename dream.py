@@ -1,7 +1,7 @@
 """
 DeepDreamer - endless DeepDream "fall" video, rendered with a pretrained VGG16.
 
-Usage (the .bat files do this for you):
+Usage (DeepDreamer.bat and the editor do this for you):
     python dream.py            -> full render using settings.ini [render]
     python dream.py --preview  -> short low-res test using settings.ini [preview]
 
@@ -59,6 +59,10 @@ def load_cfg(preview):
     c["prompt_cuts"] = int(base.get("prompt_cuts", 8))                  # random crops the prompt network looks at
     c["fade_seconds"] = float(base.get("fade_seconds", 1.5))
     c["encoder_args"] = base.get("encoder_args", "-c:v libx264 -preset fast -crf 14 -pix_fmt yuv420p").split()
+    gpu = dict(cp["gpu"]) if cp.has_section("gpu") else {}
+    lim = gpu.get("vram_limit_gb", "auto").strip().lower()
+    c["vram_limit_gb"] = None if lim in ("", "0", "off", "none") else lim      # "auto" or a number of GB
+    c["gpu_duty"] = min(1.0, max(0.05, float(gpu.get("duty", 1.0))))          # share of the time the GPU may be busy
     c["warp"] = parse_warp(cp["warp"] if cp.has_section("warp") else warp_from_old(c))   # the motion stack
     return c
 
@@ -287,7 +291,7 @@ def load_video_motion(sec, name, bad):
     try:
         v = video_motion.load(clip, source, gaps)
     except ImportError as e:
-        bad(f"{e}. Run 1_SETUP.bat again to install what the {source} source needs.")
+        bad(f"{e}. Restart DeepDreamer.bat to repair the installation (the {source} source needs it).")
     v.update(loop=loop, field_t=torch.from_numpy(v.pop("field")).half())   # moved to the GPU on first use
     return v
 
@@ -530,11 +534,23 @@ def display(img, sat, con):
     return ((o - 0.5) * con + 0.5).clamp(0, 1)
 
 
+def limit_gpu_memory(c, dev):
+    """Keep this process inside a VRAM budget so another GPU user (e.g. a local LLM) is not pushed out.
+    "auto" = 80% of what is free right now. Going over the budget raises an out-of-memory error instead."""
+    if dev.type != "cuda" or not c.get("vram_limit_gb"):
+        return
+    free, total = torch.cuda.mem_get_info()
+    gb = 0.8 * free / 2**30 if c["vram_limit_gb"] == "auto" else float(c["vram_limit_gb"])
+    torch.cuda.set_per_process_memory_fraction(min(1.0, gb * 2**30 / total))
+    print(f"GPU memory budget: {gb:.2f} GB (free now: {free / 2**30:.2f} of {total / 2**30:.2f} GB)")
+
+
 class Dreamer:
     """Turns one frame into the next. Used by main() and by the editor's "How it's made" view (editor/inspect.py)."""
 
     def __init__(self, c, dev):
         self.c, self.dev = c, dev
+        limit_gpu_memory(c, dev)
         self.amp = dev.type == "cuda"
         fps = c["fps"]
         self.model = build_model(dev, c["model"])
@@ -605,6 +621,18 @@ def open_writer(path, c):
     return subprocess.Popen(cmd, stdin=subprocess.PIPE)
 
 
+def number_video(final, settings_backup, out_dir, c):
+    """Rename the finished render to NN-dream_<height>p<fps>.mp4, NN being one more than the highest number used
+    in the output folder, and give its settings copy the same name."""
+    top = max([int(m.group(1)) for f in os.listdir(out_dir) if (m := re.match(r"^(\d+)-.*\.mp4$", f))] or [0])
+    stem = f"{top + 1}-dream_{c['height']}p{c['fps']}"
+    os.replace(final, os.path.join(out_dir, stem + ".mp4"))
+    print(f"Saved video as output/{stem}.mp4")
+    if os.path.exists(settings_backup):
+        os.replace(settings_backup, os.path.join(out_dir, stem + "_settings.ini"))
+        print(f"Saved settings as output/{stem}_settings.ini")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--preview", action="store_true")
@@ -636,6 +664,9 @@ def main():
     torch.manual_seed(c["seed"])
     fade_n = max(1, int(c["fade_seconds"] * FPS))
     t0 = time.time()
+    duty = c["gpu_duty"]
+    if duty < 1 and dev.type == "cuda":
+        print(f"GPU duty {duty:.0%}: pausing between frames so other GPU programs keep running smoothly")
 
     for seg in range(nseg):
         out_path = os.path.join(work, f"seg_{seg:03d}.mp4")
@@ -649,15 +680,18 @@ def main():
         wr = open_writer(out_path + ".tmp.mp4", c)
         f_end = min(N, (seg + 1) * SEG)
         for f in range(seg * SEG, f_end):
+            t_frame = time.time()
             try:
                 img = dreamer.step(img, f)
             except torch.cuda.OutOfMemoryError:
-                print("\nOut of GPU memory. Lower width/height in settings.ini (e.g. 1280x720) or remove 1.0 from scales.")
+                print("\nOut of GPU memory. Lower width/height in settings.ini (e.g. 960x540) or remove 1.0 from scales, or raise vram_limit_gb in [gpu].")
                 sys.exit(1)
             fade = min(1.0, (f + 1) / fade_n, (N - f) / fade_n)
             o = display(img, c["saturation"], c["contrast"]) * fade
             frame = o[0].permute(1, 2, 0).mul(255).byte().cpu().numpy()
             wr.stdin.write(frame.tobytes())
+            if duty < 1 and dev.type == "cuda":      # the .cpu() above has synced, so this is the real GPU time
+                time.sleep((time.time() - t_frame) * (1 / duty - 1))
             if time.time() - last_live > 0.5:
                 last_live = time.time()
                 write_live(frame, live, f, N, FPS)
@@ -685,6 +719,9 @@ def main():
         fh.write(settings_text)
     print("\nDONE ->", final)
     print("Settings used saved as", settings_backup)
+    if not args.preview:
+        number_video(final, settings_backup, out_dir, c)
+        shutil.rmtree(work, ignore_errors=True)   # finished: the next render starts fresh
 
 
 if __name__ == "__main__":

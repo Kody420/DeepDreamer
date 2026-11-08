@@ -40,3 +40,6 @@ attngan/*_vocab.json
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# ---- Python that DeepDreamer.bat installs for itself when the PC has none
+python/

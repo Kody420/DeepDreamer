@@ -1,15 +1,19 @@
 """
 DeepDreamer settings editor - a small local web app (Python standard library only).
 
-    venv\\Scripts\\python.exe editor\\server.py      (4_EDITOR.bat does this)
+    python editor\\server.py      (DeepDreamer.bat does this)
 
 Serves the editor on http://127.0.0.1:8765, reads/writes settings.ini (keeping its comments),
-runs the preview and the render (3_RENDER.bat, so finished videos are numbered as usual)
-and plays the videos in output\\. Only reachable from this computer.
+runs the preview and the render (dream.py, which numbers finished videos) and plays the videos in output\\.
+While venv\\ is missing or incomplete it serves an install page instead and builds it (installer.py).
+Only reachable from this computer.
 """
 import os, re, sys, json, time, glob, shutil, secrets, threading, subprocess, configparser, webbrowser
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, unquote, parse_qs
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from installer import Installer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INI = os.path.join(ROOT, "settings.ini")
@@ -24,6 +28,7 @@ IMAGE_EXT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", "
 PY = os.path.join(ROOT, "venv", "Scripts", "python.exe")
 PORT = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else int(os.environ.get("DREAM_EDITOR_PORT", "8765"))
 VERSION = 6                   # bump with every change to the API; index.html checks it
+INSTALL = Installer(ROOT)
 TOKEN = secrets.token_hex(16)   # every API call must carry it, so other web pages can't drive the editor
 
 
@@ -175,6 +180,8 @@ class Job:
                 self.result = "attngan"
 
     def start(self, kind, opts=None):
+        if not INSTALL.ready():
+            raise RuntimeError("DeepDreamer is still being installed.")
         with self.lock:
             if self.proc is not None and self.proc.poll() is None:
                 raise RuntimeError("Something is already running. Stop it first.")
@@ -183,7 +190,7 @@ class Job:
                 shutil.rmtree(os.path.join(ROOT, "work_preview"), ignore_errors=True)
                 cmd = [PY, os.path.join(ROOT, "dream.py"), "--preview"]
             elif kind == "render":
-                cmd = ["cmd", "/c", os.path.join(ROOT, "3_RENDER.bat")]
+                cmd = [PY, os.path.join(ROOT, "dream.py")]
             elif kind == "motion":   # extract a clip's motion for the video module (video_motion.py)
                 o = opts or {}
                 clip = resolve(str(o.get("clip", "")))
@@ -213,7 +220,7 @@ class Job:
                 return False
             self.stopped = True
             pid = self.proc.pid
-        # the render runs as cmd -> python -> ffmpeg; take the whole tree down
+        # the render runs as python -> ffmpeg; take the whole tree down
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
         return True
 
@@ -357,8 +364,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self._host_ok():
             return self._send(403, {"error": "forbidden"})
         path = urlparse(self.path).path
+        if path == "/api/setup":
+            return self._send(200, INSTALL.state())
         if path in ("/", "/index.html"):
-            with open(os.path.join(os.path.dirname(__file__), "index.html"), encoding="utf-8") as fh:
+            page = "index.html" if INSTALL.ready() else "setup.html"
+            with open(os.path.join(os.path.dirname(__file__), page), encoding="utf-8") as fh:
                 return self._send(200, fh.read().replace("__TOKEN__", TOKEN), "text/html; charset=utf-8")
         if path.startswith("/media/"):
             return self._media(path[len("/media/"):])
@@ -387,6 +397,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._media("", p)
         if not self._api_ok():
             return self._send(403, {"error": "missing token - reload the page"})
+        if not INSTALL.ready():
+            return self._send(503, {"error": "DeepDreamer is still being installed - reload the page.", "setup": True})
         if path == "/api/motion":
             body, err = motion_field(parse_qs(urlparse(self.path).query))
             if body is None:
@@ -426,6 +438,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self._api_ok():
             return self._send(403, {"error": "The editor was restarted after this page was opened. Reload the page."})
         try:
+            if path == "/api/setup/retry":
+                INSTALL.start()
+                return self._send(200, {"ok": True})
+            if not INSTALL.ready():
+                return self._send(503, {"error": "DeepDreamer is still being installed - reload the page.", "setup": True})
             if path == "/api/upload_clip":
                 saved = save_clip(unquote(self.headers.get("X-Filename") or ""), raw)
                 return self._send(200, {"ok": True, "path": saved})
@@ -510,6 +527,7 @@ def main():
         return
     url = f"http://127.0.0.1:{PORT}"
     print(f"DeepDreamer editor running at {url}  (close this window to stop it)")
+    INSTALL.start()        # checks venv and builds it if needed; the page shows the progress
     if "--no-browser" not in sys.argv:
         webbrowser.open(url)
     try:
@@ -518,6 +536,8 @@ def main():
         pass
     finally:
         JOB.stop()
+        if INSTALL.proc is not None:
+            subprocess.run(["taskkill", "/PID", str(INSTALL.proc.pid), "/T", "/F"], capture_output=True)
 
 
 if __name__ == "__main__":

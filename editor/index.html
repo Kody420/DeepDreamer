@@ -291,7 +291,7 @@ const TOKEN = "__TOKEN__";
 const EDITOR_VERSION = 6;   // must match VERSION in server.py
 // fetch, but when the editor isn't running any more say so, instead of the browser's "Failed to fetch"
 const net = (url, opts) => fetch(url, opts).catch(() => {
-  throw new Error("The editor isn't answering. Check that its window (4_EDITOR.bat) is still open, then reload this page.");
+  throw new Error("The editor isn't answering. Check that its window (DeepDreamer.bat) is still open, then reload this page.");
 });
 const api = async (path, body) => {
   const r = await net(path, body === undefined ? { headers: { "X-Token": TOKEN } }
@@ -798,7 +798,7 @@ async function loadState(first = false) {
   if (first && s.version !== EDITOR_VERSION && !document.getElementById("outdated")) {
     document.body.insertAdjacentHTML("afterbegin", `<div id="outdated" class="w bad" style="margin:0;border-radius:0">
       <b>The editor was updated but is still running the old version.</b> Close the editor's black window
-      (wait for any running preview or render to finish first) and start 4_EDITOR.bat again.</div>`);
+      (wait for any running preview or render to finish first) and start DeepDreamer.bat again.</div>`);
   }
   if (first) { saved = withSections(s.settings); cur = JSON.parse(JSON.stringify(saved)); refresh(); }
   videos = s.videos; renderGallery();
@@ -980,7 +980,7 @@ warp = WarpLab.mount({
   stopJob: () => api("/api/stop", {}).then(pollJob).catch(e => toast(e.message)),
 }) || WarpLab;
 selectTab(dreamTab);
-loadState(true).catch(e => { document.body.insertAdjacentHTML("afterbegin", `<div class="w bad" style="margin:12px">Could not reach the editor server: ${esc(e.message)}. Start it with 4_EDITOR.bat.</div>`); });
+loadState(true).catch(e => { document.body.insertAdjacentHTML("afterbegin", `<div class="w bad" style="margin:12px">Could not reach the editor server: ${esc(e.message)}. Start DeepDreamer.bat.</div>`); });
 </script>
 </body>
 </html>

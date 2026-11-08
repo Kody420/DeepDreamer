@@ -28,24 +28,35 @@ that runs in your browser.
 
 ## Requirements
 
-- Windows with an NVIDIA GPU (tested on an RTX 5070 Ti; the CPU fallback is very slow)
-- Python 3.10–3.12
-- About 4 GB of disk space for PyTorch and the network weights
+- Windows 10 or 11, 64-bit, with an NVIDIA GPU (the CPU fallback works but is very slow)
+- Internet for the first start (about 3 GB for PyTorch and the network weights)
+- Python is not required: if the PC has none that PyTorch supports (3.10 to 3.14), `DeepDreamer.bat` installs
+  Python 3.12 into its own `python\` folder, without administrator rights
 
 ## Getting started
 
-1. Double-click **`1_SETUP.bat`** once. It creates `venv\` and installs PyTorch (CUDA 12.8 build), CLIP and
-   the other packages, then downloads the VGG16 weights.
-2. Double-click **`4_EDITOR.bat`**. The editor opens in your browser. Pick a recipe, press **Save & preview**,
-   then **Save & render** when you like it.
+Double-click **`DeepDreamer.bat`**. That is all: it opens the editor in your browser.
 
-Without the editor: edit `settings.ini`, run `2_PREVIEW.bat` for a short test, then `3_RENDER.bat`.
+The first time (or whenever something is missing or broken) the page shows an installation screen instead and
+installs everything itself: a private Python environment, PyTorch (the CUDA build that matches your NVIDIA
+driver, otherwise the CPU build) and the packages, then downloads the VGG16 network. When it is done the page
+turns into the editor. Keep the black window open while you use it; closing it stops the editor and any render.
+
+Pick a recipe, press **Save & preview**, then **Save & render** when you like it. Or edit `settings.ini` and run
+`venv\Scripts\python.exe dream.py --preview` / `dream.py` yourself.
 
 For the Text to image tab, run this once to download and prepare AttnGAN (about 315 MB):
 
 ```bash
 venv\Scripts\python.exe attngan\setup_files.py
 ```
+
+### Sharing the GPU with other programs
+
+The `[gpu]` section of `settings.ini` keeps a render polite while something else (say, a local LLM) uses the
+same card: `vram_limit_gb` caps the video memory it may take (`auto` = 80% of what is free at the start) and
+`duty` is the share of the time the GPU works, the rest being pauses between frames. If a render runs out of
+memory, lower the width and height (for example 960x540) or remove `1.0` from `scales`.
 
 ## What's in the repository
 
@@ -59,10 +70,10 @@ venv\Scripts\python.exe attngan\setup_files.py
 | `video_motion.py` | Extracts a clip's motion (optical flow or codec vectors) for the Video motion module |
 | `attngan/generate.py` | AttnGAN text-to-image, ported to current PyTorch |
 | `attngan/setup_files.py` | Downloads the AttnGAN files and converts them to safe formats |
-| `1_SETUP.bat` … `4_EDITOR.bat` | Setup, preview, render and editor launchers |
-| `README.txt` | Short usage notes and tuning tips |
+| `DeepDreamer.bat` | The only launcher: finds or installs Python, starts the editor |
+| `editor/installer.py`, `editor/setup.html` | The first-run installation, and the page that shows its progress |
 
-Created when you use it, and not tracked by git: `venv/`, `output/` (your videos), `work/` and `work_preview/`
+Created when you use it, and not tracked by git: `venv/`, `python/` (only if it had to be installed), `output/` (your videos), `work/` and `work_preview/`
 (render chunks), `preview.mp4`, `init_images/` (start images picked in the editor), `clips/` and `video_motion/`
 (clips for the Video motion module and their extracted motion) and the AttnGAN weights.
 

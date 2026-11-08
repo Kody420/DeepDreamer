@@ -187,7 +187,7 @@ def main():
     try:
         out = extract(a.clip, a.source, a.gaps)
     except ImportError as e:
-        sys.exit(f"{e}. Run 1_SETUP.bat again to install it.")
+        sys.exit(f"{e}. Restart DeepDreamer.bat to repair the installation.")
     z = np.load(out)
     print(f"\nSaved motion as {os.path.relpath(out, HERE)}: {z['field'].shape[0]} frames at {float(z['fps']):g} fps")
 
